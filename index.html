@@ -103,6 +103,7 @@ function FamilyTree() {
   const [log, setLog] = useState([]);
 
   const [selectedId, setSelectedId] = useState(null);
+  const [radialRoot, setRadialRoot] = useState(null);
   const [linkMode, setLinkMode] = useState(false);
   const [linkFrom, setLinkFrom] = useState(null);
   const [tab, setTab] = useState("edit"); // edit | log
@@ -655,6 +656,7 @@ function FamilyTree() {
                     onAddParent={() => addParent(selected.id)}
                     onDelete={() => deletePerson(selected.id)}
                     onRemoveEdge={removeEdge}
+                    onRadial={() => setRadialRoot(selected.id)}
                     onSelect={(id) => { setSelectedId(id); }}
                   />
                 ) : (
@@ -691,6 +693,64 @@ function FamilyTree() {
       <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
         onChange={e => { if (selected) handlePhoto(selected.id, e.target.files[0]); e.target.value = ""; }} />
 
+      {radialRoot && (() => {
+        const kids = {}; edges.forEach(e => { (kids[e.from] = kids[e.from] || []).push(e.to); });
+        const W = 920, H = 920, ccx = W/2, ccy = H/2, RING = 150;
+        const ns = [], ls = [];
+        const lay = (id, depth, a0, a1, par) => {
+          const ang = (a0 + a1) / 2, r = depth * RING;
+          const x = ccx + r * Math.cos(ang), y = ccy + r * Math.sin(ang);
+          const pp = pmap[id]; if (!pp) return;
+          const pos = { id, x, y, depth, name: pp.name, dead: pp.deceased };
+          ns.push(pos); if (par) ls.push({ a: par, b: pos });
+          const ks = (kids[id] || []).slice(0, 12);
+          if (ks.length && depth < 3) {
+            const sp = (a1 - a0) / ks.length;
+            ks.forEach((k, i) => lay(k, depth + 1, a0 + i*sp, a0 + (i+1)*sp, pos));
+          }
+        };
+        lay(radialRoot, 0, -Math.PI/2, Math.PI*1.5, null);
+        const NR = d => d===0 ? 44 : d===1 ? 32 : 24;
+        return (
+          <div style={{ position: "absolute", inset: 0, background: C.bg, zIndex: 60, overflow: "auto",
+            display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "12px 18px", borderBottom: `1px solid ${C.border}`, flexShrink: 0, background: "#fff" }}>
+              <div style={{ fontFamily: "'Amiri',serif", fontSize: 20, color: C.gold, fontWeight: 700 }}>
+                عرض دائري — فرع {pmap[radialRoot]?.name}
+              </div>
+              <Btn C={C} onClick={() => setRadialRoot(null)}>عودة للشجرة</Btn>
+            </div>
+            <div style={{ flex: 1, overflow: "auto", display: "grid", placeItems: "center", padding: 10 }}>
+              <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 900 }}>
+                {[1,2,3].map(r => <circle key={r} cx={ccx} cy={ccy} r={r*RING} fill="none" stroke="#e4dfd4" />)}
+                {ls.map((l,i) => <line key={i} x1={l.a.x} y1={l.a.y} x2={l.b.x} y2={l.b.y} stroke={C.line} strokeWidth="1.5" />)}
+                {ns.map((n,i) => {
+                  const rr = NR(n.depth), ph = photos[n.id];
+                  return (
+                    <g key={i} style={{ cursor: "pointer" }}
+                       onClick={() => { if ((kids[n.id]||[]).length) setRadialRoot(n.id); }}>
+                      <circle cx={n.x} cy={n.y} r={rr+2} fill="#fff"
+                        stroke={n.depth===0 ? C.gold : "#ddd7c9"} strokeWidth={n.depth===0?3:2} />
+                      {ph ? <g><clipPath id={"rc"+i}><circle cx={n.x} cy={n.y} r={rr}/></clipPath>
+                        <image href={ph} x={n.x-rr} y={n.y-rr} width={rr*2} height={rr*2}
+                          clipPath={`url(#rc${i})`} preserveAspectRatio="xMidYMid slice"/></g>
+                        : <circle cx={n.x} cy={n.y} r={rr} fill="#e9e4d8"/>}
+                      <text x={n.x} y={n.y+rr+14} textAnchor="middle" fontSize={n.depth===0?15:12}
+                        fontFamily="serif" fontWeight="700" fill={C.parch}>{n.name}</text>
+                      {n.dead && <text x={n.x} y={n.y+rr+27} textAnchor="middle" fontSize="10" fill={C.sub}>رحمه الله</text>}
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+            <div style={{ textAlign: "center", color: C.sub, fontSize: 12, padding: "0 0 10px" }}>
+              اضغط أي شخص لجعله المركز · "عودة للشجرة" للرجوع
+            </div>
+          </div>
+        );
+      })()}
+
       {loading && (
         <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: C.bg, zIndex: 50 }}>
           <div style={{ color: C.gold, fontFamily: "'Amiri',serif", fontSize: 20 }}>جارٍ التحميل…</div>
@@ -719,7 +779,7 @@ function RoundBtn({ children, onClick, C, title }) {
   );
 }
 
-function EditPanel({ C, person, photo, people, edges, onName, onNameCommit, onNote, onDeceased,
+function EditPanel({ C, person, photo, people, edges, onRadial, onName, onNameCommit, onNote, onDeceased,
   onUpload, onRemovePhoto, onAddChild, onAddParent, onDelete, onRemoveEdge, onSelect }) {
   const label = { fontSize: 12, color: C.sub, marginBottom: 5, display: "block" };
   const inp = {
@@ -760,10 +820,15 @@ function EditPanel({ C, person, photo, people, edges, onName, onNameCommit, onNo
         متوفى (رحمه الله)
       </label>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <Btn C={C} onClick={onAddParent}>+ والد</Btn>
         <Btn C={C} onClick={onAddChild}>+ ابن / ابنة</Btn>
       </div>
+      <button onClick={onRadial} style={{
+        width: "100%", padding: "10px", borderRadius: 7, border: "none",
+        background: C.gold, color: "#fff", cursor: "pointer", fontFamily: "'Tajawal'",
+        fontSize: 14, fontWeight: 600, marginBottom: 16,
+      }}>عرض الفرع دائريًا</button>
 
       {(parents.length > 0 || children.length > 0) && (
         <div style={{ marginBottom: 16 }}>
