@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<title>شجرة العائلة - الوزرة</title>
+<style>html,body,#root{margin:0;padding:0;height:100%;background:#f6f4ee;font-family:'Tajawal',sans-serif}
+#boot{position:fixed;inset:0;display:grid;place-items:center;color:#2f7d62;font-size:20px;font-family:serif}</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"><div id="boot">جارٍ التحميل…</div></div>
+<script>
+// persistent storage backed by the browser (localStorage), with graceful fallback
+window.storage = {
+  async get(k){ try{const v=localStorage.getItem(k); return v===null?null:{key:k,value:v,shared:false};}catch(e){return null;} },
+  async set(k,v){ try{localStorage.setItem(k,v);}catch(e){} return {key:k,value:v,shared:false}; },
+  async delete(k){ try{localStorage.removeItem(k);}catch(e){} return {key:k,deleted:true,shared:false}; },
+  async list(prefix){ const keys=[]; try{for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(!prefix||kk.startsWith(prefix))keys.push(kk);}}catch(e){} return {keys,prefix,shared:false}; }
+};
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+let SEED = { people:[], edges:[], photos:{}, log:[] };
+
+
+
+// ====================== Storage helpers ======================
+const hasStore = typeof window !== "undefined" && window.storage;
+const mem = {};
+const store = {
+  async get(k) {
+    if (!hasStore) return mem[k] ?? null;
+    try { const r = await window.storage.get(k); return r ? r.value : null; }
+    catch { return null; }
+  },
+  async set(k, v) {
+    if (!hasStore) { mem[k] = v; return; }
+    try { await window.storage.set(k, v); } catch (e) { console.error(e); }
+  },
+  async del(k) {
+    if (!hasStore) { delete mem[k]; return; }
+    try { await window.storage.delete(k); } catch {}
+  },
+  async list(prefix) {
+    if (!hasStore) return Object.keys(mem).filter(x => x.startsWith(prefix));
+    try { const r = await window.storage.list(prefix); return r ? r.keys : []; }
+    catch { return []; }
+  },
+};
+
+const TREE_KEY = "ft:tree";
+const LOG_KEY = "ft:log";
+const photoKey = (id) => `ft:photo:${id}`;
+
+// ====== Seed data (from transcription) ======
+
+
+// ====================== Utilities ======================
+const uid = () => Math.random().toString(36).slice(2, 10);
+const NODE_W = 156;
+const NODE_H = 138;
+
+function resizeImage(file, max = 280) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width: w, height: h } = img;
+        const scale = Math.min(1, max / Math.max(w, h));
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL("image/jpeg", 0.72));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function fmtTime(ts) {
+  try {
+    return new Intl.DateTimeFormat("ar-SA", {
+      dateStyle: "medium", timeStyle: "short", calendar: "gregory", numberingSystem: "latn",
+    }).format(new Date(ts));
+  } catch { return new Date(ts).toLocaleString(); }
+}
+
+// ====================== Main Component ======================
+function FamilyTree() {
+  const [people, setPeople] = useState([]);
+  const [edges, setEdges] = useState([]);
+  const [photos, setPhotos] = useState({});
+  const [log, setLog] = useState([]);
+
+  const [selectedId, setSelectedId] = useState(null);
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkFrom, setLinkFrom] = useState(null);
+  const [tab, setTab] = useState("edit"); // edit | log
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [showPanel, setShowPanel] = useState(false);
+
+  const [view, setView] = useState({ s: 1, tx: 0, ty: 0 });
+  const loadedRef = useRef(false);
+  const canvasRef = useRef(null);
+  const fileRef = useRef(null);
+  const importRef = useRef(null);
+  const dragRef = useRef(null);
+  const panRef = useRef(null);
+  const saveTimer = useRef(null);
+
+  // ---------- Inject fonts ----------
+  useEffect(() => {
+    const id = "ft-fonts";
+    if (document.getElementById(id)) return;
+    const l = document.createElement("link");
+    l.id = id; l.rel = "stylesheet";
+    l.href = "https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Tajawal:wght@400;500;700&display=swap";
+    document.head.appendChild(l);
+  }, []);
+
+  // ---------- Initial load ----------
+  useEffect(() => {
+    (async () => {
+      const raw = await store.get(TREE_KEY);
+      let p = [], e = [];
+      if (raw) {
+        try { const d = JSON.parse(raw); p = d.people || []; e = d.edges || []; } catch {}
+      }
+      const lg = await store.get(LOG_KEY);
+      let logArr = [];
+      if (lg) { try { logArr = JSON.parse(lg) || []; } catch {} }
+
+      // First run (no stored data): seed from the transcription
+      let seeded = false;
+      if (p.length === 0 && e.length === 0) {
+        p = SEED.people.map(n => ({ ...n }));
+        e = SEED.edges.map(x => ({ ...x }));
+        seeded = true;
+      }
+
+      setPeople(p); setEdges(e);
+
+      if (seeded) {
+        store.set(TREE_KEY, JSON.stringify({ people: p, edges: e }));
+        logArr = [{ id: "seed", ts: Date.now(), text: `تعبئة الشجرة من التفريغ (${p.length} فرد)` }];
+        store.set(LOG_KEY, JSON.stringify(logArr));
+      }
+      setLog(logArr);
+
+      // photos: seeded from embedded data, overlaid by any user uploads in storage
+      const ph = { ...SEED.photos };
+      const keys = await store.list("ft:photo:");
+      for (const k of keys) {
+        const v = await store.get(k);
+        if (v) ph[k.replace("ft:photo:", "")] = v;
+      }
+      setPhotos(ph);
+
+      // open zoomed onto the top-left (apex) so names are readable; use search/zoom to navigate
+      {
+        const r = canvasRef.current?.getBoundingClientRect();
+        const vw = r ? r.width : 900, vh = r ? r.height : 600;
+        const n0 = p[0] || { x: 0, y: 120 };
+        const s0 = 0.62;
+        setView({ s: s0, tx: vw / 2 - n0.x * s0, ty: Math.max(24, vh * 0.16) - n0.y * s0 });
+      }
+
+      setLoading(false);
+      loadedRef.current = true;
+    })();
+  }, []);
+
+  // ---------- Persist tree (debounced) ----------
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      store.set(TREE_KEY, JSON.stringify({ people, edges }));
+    }, 400);
+  }, [people, edges]);
+
+  // ---------- Logging ----------
+  const addLog = useCallback((text) => {
+    setLog(prev => {
+      const next = [{ id: uid(), ts: Date.now(), text }, ...prev].slice(0, 800);
+      store.set(LOG_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  // ====================== Actions ======================
+  const centerWorld = () => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const w = rect ? rect.width : 800, h = rect ? rect.height : 600;
+    return { x: (w / 2 - view.tx) / view.s, y: (h / 2 - view.ty) / view.s };
+  };
+
+  const addPerson = (preset = {}) => {
+    const c = centerWorld();
+    const np = {
+      id: uid(),
+      name: preset.name || "اسم جديد",
+      x: preset.x ?? c.x, y: preset.y ?? c.y,
+      note: "", deceased: false,
+    };
+    setPeople(prev => [...prev, np]);
+    setSelectedId(np.id);
+    setTab("edit");
+    addLog(`إضافة شخص جديد: ${np.name}`);
+    return np;
+  };
+
+  const updatePerson = (id, patch, logText) => {
+    setPeople(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p));
+    if (logText) addLog(logText);
+  };
+
+  const deletePerson = (id) => {
+    const p = people.find(x => x.id === id);
+    if (!p) return;
+    if (!window.confirm(`حذف "${p.name}" وجميع روابطه؟`)) return;
+    setPeople(prev => prev.filter(x => x.id !== id));
+    setEdges(prev => prev.filter(e => e.from !== id && e.to !== id));
+    setPhotos(prev => { const n = { ...prev }; delete n[id]; return n; });
+    store.del(photoKey(id));
+    if (selectedId === id) setSelectedId(null);
+    addLog(`حذف الشخص: ${p.name}`);
+  };
+
+  const addEdge = (from, to) => {
+    if (from === to) return;
+    if (edges.some(e => e.from === from && e.to === to)) return;
+    setEdges(prev => [...prev, { id: uid(), from, to }]);
+    const a = people.find(p => p.id === from)?.name || "";
+    const b = people.find(p => p.id === to)?.name || "";
+    addLog(`إضافة رابط: ${a} ← ${b}`);
+  };
+
+  const removeEdge = (eid) => {
+    const e = edges.find(x => x.id === eid);
+    if (!e) return;
+    setEdges(prev => prev.filter(x => x.id !== eid));
+    const a = people.find(p => p.id === e.from)?.name || "";
+    const b = people.find(p => p.id === e.to)?.name || "";
+    addLog(`حذف رابط: ${a} ← ${b}`);
+  };
+
+  const addChild = (parentId) => {
+    const parent = people.find(p => p.id === parentId);
+    if (!parent) return;
+    const child = addPerson({ x: parent.x + 30, y: parent.y + 200, name: "ابن / ابنة" });
+    setEdges(prev => [...prev, { id: uid(), from: parentId, to: child.id }]);
+    addLog(`ربط ابن جديد بـ ${parent.name}`);
+  };
+
+  const addParent = (childId) => {
+    const child = people.find(p => p.id === childId);
+    if (!child) return;
+    const parent = addPerson({ x: child.x - 30, y: child.y - 200, name: "والد / والدة" });
+    setEdges(prev => [...prev, { id: uid(), from: parent.id, to: childId }]);
+    addLog(`ربط والد جديد بـ ${child.name}`);
+  };
+
+  const handlePhoto = async (id, file) => {
+    if (!file) return;
+    try {
+      const data = await resizeImage(file);
+      setPhotos(prev => ({ ...prev, [id]: data }));
+      await store.set(photoKey(id), data);
+      const nm = people.find(p => p.id === id)?.name || "";
+      addLog(`رفع صورة لـ ${nm}`);
+    } catch { window.alert("تعذر تحميل الصورة"); }
+  };
+
+  const removePhoto = (id) => {
+    setPhotos(prev => { const n = { ...prev }; delete n[id]; return n; });
+    store.del(photoKey(id));
+    addLog(`حذف صورة: ${people.find(p => p.id === id)?.name || ""}`);
+  };
+
+  const onNodeClick = (id) => {
+    if (linkMode) {
+      if (!linkFrom) { setLinkFrom(id); }
+      else { addEdge(linkFrom, id); setLinkFrom(null); setLinkMode(false); }
+      return;
+    }
+    setSelectedId(id); setTab("edit"); setShowPanel(true);
+  };
+
+  // ====================== Pointer: drag node / pan ======================
+  const onNodePointerDown = (e, id) => {
+    // nodes are locked to their generation tier; only the canvas pans
+  };
+  const onCanvasPointerDown = (e) => {
+    panRef.current = { startX: e.clientX, startY: e.clientY, tx: view.tx, ty: view.ty };
+  };
+  const onPointerMove = (e) => {
+    if (dragRef.current) {
+      const d = dragRef.current;
+      const dx = (e.clientX - d.startX) / view.s;
+      const dy = (e.clientY - d.startY) / view.s;
+      if (Math.abs(e.clientX - d.startX) + Math.abs(e.clientY - d.startY) > 3) d.moved = true;
+      setPeople(prev => prev.map(p => p.id === d.id ? { ...p, x: d.ox + dx, y: d.oy + dy } : p));
+    } else if (panRef.current) {
+      const p = panRef.current;
+      setView(v => ({ ...v, tx: p.tx + (e.clientX - p.startX), ty: p.ty + (e.clientY - p.startY) }));
+    }
+  };
+  const onPointerUp = () => {
+    if (dragRef.current?.moved) {
+      const nm = people.find(p => p.id === dragRef.current.id)?.name || "";
+      addLog(`تحريك العقدة: ${nm}`);
+    }
+    dragRef.current = null; panRef.current = null;
+  };
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    const rect = canvasRef.current.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const wx = (mx - view.tx) / view.s, wy = (my - view.ty) / view.s;
+    const ns = Math.min(2.5, Math.max(0.25, view.s * (e.deltaY < 0 ? 1.1 : 0.9)));
+    setView({ s: ns, tx: mx - wx * ns, ty: my - wy * ns });
+  };
+  const zoom = (f) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const mx = rect.width / 2, my = rect.height / 2;
+    const wx = (mx - view.tx) / view.s, wy = (my - view.ty) / view.s;
+    const ns = Math.min(2.5, Math.max(0.25, view.s * f));
+    setView({ s: ns, tx: mx - wx * ns, ty: my - wy * ns });
+  };
+
+  // ====================== Backup ======================
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify({ people, edges, photos, log }, null, 2)],
+      { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `family-tree-${Date.now()}.json`;
+    a.click();
+    addLog("تصدير نسخة احتياطية");
+  };
+  const importData = async (file) => {
+    if (!file) return;
+    try {
+      const txt = await file.text();
+      const d = JSON.parse(txt);
+      setPeople(d.people || []); setEdges(d.edges || []);
+      setPhotos(d.photos || {}); 
+      await store.set(TREE_KEY, JSON.stringify({ people: d.people || [], edges: d.edges || [] }));
+      for (const [id, data] of Object.entries(d.photos || {})) await store.set(photoKey(id), data);
+      addLog("استيراد نسخة احتياطية");
+    } catch { window.alert("ملف غير صالح"); }
+  };
+
+  // ====================== Render ======================
+  const pmap = {}; for (const _p of people) pmap[_p.id] = _p;
+  const selected = people.find(p => p.id === selectedId);
+  const searchHits = search.trim()
+    ? people.filter(p => p.name.includes(search.trim()))
+    : [];
+
+  const C = {
+    bg: "#f6f4ee", panel: "#ffffff", panel2: "#f1ede4",
+    gold: "#2f7d62", goldSoft: "#3f8f73", parch: "#2b2a25",
+    sub: "#7b7568", line: "#9fb6ab", border: "#e4dfd4",
+  };
+
+  const focusPerson = (p) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    setView({ s: 1, tx: rect.width / 2 - p.x, ty: rect.height / 2 - p.y });
+    setSelectedId(p.id); setSearch("");
+  };
+
+  return (
+    <div dir="rtl" style={{
+      fontFamily: "'Tajawal', sans-serif", background: C.bg, color: C.parch,
+      width: "100%", height: "100vh", display: "flex", flexDirection: "column",
+      overflow: "hidden", position: "relative",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "12px 18px", borderBottom: `1px solid ${C.border}`,
+        background: "#ffffff", flexShrink: 0, zIndex: 30,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: 8, display: "grid", placeItems: "center",
+            background: C.gold, color: "#ffffff", fontWeight: 700, fontSize: 20,
+            fontFamily: "'Amiri', serif",
+          }}>ش</div>
+          <div>
+            <div style={{ fontFamily: "'Amiri', serif", fontSize: 22, fontWeight: 700, color: C.gold, lineHeight: 1.1 }}>
+              شجرة العائلة
+            </div>
+            <div style={{ fontSize: 11, color: C.sub }}>
+              {people.length} فرد · {edges.length} رابط
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Btn C={C} onClick={() => addPerson()}>+ شخص</Btn>
+          <Btn C={C} active={linkMode} onClick={() => { setLinkMode(m => !m); setLinkFrom(null); }}>
+            {linkMode ? (linkFrom ? "اختر الثاني…" : "اختر الأول…") : "ربط شخصين"}
+          </Btn>
+          <Btn C={C} onClick={() => setShowPanel(s => !s)}>{showPanel ? "إخفاء اللوحة" : "إظهار اللوحة"}</Btn>
+          <Btn C={C} onClick={exportData}>تصدير</Btn>
+          <Btn C={C} onClick={() => importRef.current?.click()}>استيراد</Btn>
+          <input ref={importRef} type="file" accept="application/json" style={{ display: "none" }}
+            onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
+        </div>
+      </div>
+
+      <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
+        {/* Canvas */}
+        <div
+          ref={canvasRef}
+          onPointerDown={onCanvasPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerLeave={onPointerUp}
+          onWheel={onWheel}
+          style={{
+            flex: 1, position: "relative", overflow: "hidden", cursor: "grab",
+            backgroundImage:
+              "radial-gradient(circle at 20% 30%, #eaf2ee 0, transparent 55%), radial-gradient(circle at 80% 70%, #f0ece2 0, transparent 55%)",
+            backgroundColor: C.bg,
+            touchAction: "none",
+          }}
+        >
+
+          <div style={{
+            position: "absolute", top: 0, left: 0,
+            transform: `translate(${view.tx}px,${view.ty}px) scale(${view.s})`,
+            transformOrigin: "0 0",
+          }}>
+            {/* generation tier bands + labels */}
+            {(() => {
+              if (!people.length) return null;
+              const byId = pmap;
+              const xs = people.map(p => p.x);
+              const minX = Math.min(...xs) - 240, maxX = Math.max(...xs) + 240;
+              const maxG = people.reduce((m, p) => Math.max(m, p.g || 0), 0);
+              const ord = ["الأول","الثاني","الثالث","الرابع","الخامس","السادس","السابع","الثامن","التاسع","العاشر"];
+              const bands = [];
+              for (let g = 0; g <= maxG; g++) {
+                const cy = 140 + g * 250;
+                bands.push(
+                  <div key={"band" + g} style={{
+                    position: "absolute", left: minX, top: cy - NODE_H / 2 - 26,
+                    width: maxX - minX, height: NODE_H + 52,
+                    background: g % 2 ? "rgba(47,125,98,.055)" : "rgba(47,125,98,.02)",
+                    borderTop: "1px solid rgba(47,125,98,.18)",
+                    borderBottom: "1px solid rgba(47,125,98,.18)",
+                  }}>
+                    <div style={{
+                      position: "sticky", left: 12, top: 0, display: "inline-block",
+                      marginTop: 6, padding: "3px 12px", background: C.gold, color: "#fff",
+                      borderRadius: 6, fontFamily: "'Amiri',serif", fontSize: 18, whiteSpace: "nowrap",
+                    }}>الجيل {ord[g] || (g + 1)}</div>
+                  </div>
+                );
+              }
+              return bands;
+            })()}
+
+            {/* orthogonal bus connectors (parent -> shared bus -> children) */}
+            <svg style={{ position: "absolute", overflow: "visible", width: 1, height: 1, pointerEvents: "none" }}>
+              {(() => {
+                const byId = pmap;
+                const kids = {};
+                edges.forEach(e => { (kids[e.from] = kids[e.from] || []).push(e.to); });
+                const out = [];
+                Object.keys(kids).forEach(pid => {
+                  const par = byId[pid]; if (!par) return;
+                  const cs = kids[pid].map(id => byId[id]).filter(Boolean);
+                  if (!cs.length) return;
+                  const pBot = par.y + NODE_H / 2;
+                  const cTop = cs[0].y - NODE_H / 2;
+                  const busY = pBot + (cTop - pBot) * 0.5;
+                  const xsC = cs.map(c => c.x);
+                  const loX = Math.min(par.x, ...xsC), hiX = Math.max(par.x, ...xsC);
+                  out.push(<line key={pid + "p"} x1={par.x} y1={pBot} x2={par.x} y2={busY} stroke={C.line} strokeWidth={1.5} />);
+                  if (cs.length > 1)
+                    out.push(<line key={pid + "h"} x1={loX} y1={busY} x2={hiX} y2={busY} stroke={C.line} strokeWidth={1.5} />);
+                  cs.forEach(c => out.push(
+                    <line key={pid + c.id} x1={c.x} y1={busY} x2={c.x} y2={c.y - NODE_H / 2} stroke={C.line} strokeWidth={1.5} />
+                  ));
+                });
+                return out;
+              })()}
+            </svg>
+
+            {/* nodes */}
+            {people.map(p => {
+              const isSel = p.id === selectedId;
+              const isLinkFrom = linkFrom === p.id;
+              return (
+                <div key={p.id}
+                  onPointerDown={(e) => onNodePointerDown(e, p.id)}
+                  onClick={(e) => { e.stopPropagation(); if (!dragRef.current?.moved) onNodeClick(p.id); }}
+                  style={{
+                    position: "absolute", left: p.x, top: p.y,
+                    width: NODE_W, height: NODE_H, marginLeft: -NODE_W / 2, marginTop: -NODE_H / 2,
+                    background: "linear-gradient(180deg,#ffffff,#f5f2ea)",
+                    borderRadius: 12, padding: 10, boxSizing: "border-box",
+                    border: `2px solid ${isLinkFrom ? "#e0a23a" : isSel ? C.gold : "#ddd7c9"}`,
+                    boxShadow: isSel ? `0 0 0 4px rgba(47,125,98,.22), 0 8px 22px rgba(0,0,0,.16)` : "0 3px 10px rgba(0,0,0,.10)",
+                    display: "flex", flexDirection: "column", alignItems: "center",
+                    cursor: "pointer", userSelect: "none",
+                  }}>
+                  <div style={{
+                    width: 60, height: 60, borderRadius: "50%", overflow: "hidden",
+                    border: `2px solid ${C.goldSoft}`, background: "#e9e4d8",
+                    display: "grid", placeItems: "center", flexShrink: 0,
+                  }}>
+                    {photos[p.id]
+                      ? <img src={photos[p.id]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      : <span style={{ fontFamily: "'Amiri',serif", fontSize: 26, color: "#8c857a" }}>
+                          {p.name?.trim()?.[0] || "؟"}
+                        </span>}
+                  </div>
+                  <div style={{
+                    fontFamily: "'Amiri', serif", fontWeight: 700, fontSize: 15, color: "#2c2415",
+                    marginTop: 6, textAlign: "center", lineHeight: 1.2, maxWidth: "100%",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>{p.name}</div>
+                  {p.deceased && (
+                    <div style={{ fontSize: 11, color: "#7a6a47", fontFamily: "'Amiri',serif" }}>
+                      رحمه الله
+                    </div>
+                  )}
+                  {p.note && !p.deceased && (
+                    <div style={{ fontSize: 10, color: "#6b5d40", marginTop: 2, textAlign: "center",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
+                      {p.note}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* empty state */}
+          {!loading && people.length === 0 && (
+            <div style={{
+              position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none",
+            }}>
+              <div style={{ textAlign: "center", pointerEvents: "auto" }}>
+                <div style={{ fontFamily: "'Amiri',serif", fontSize: 26, color: C.gold, marginBottom: 6 }}>
+                  ابدأ ببناء شجرة عائلتك
+                </div>
+                <div style={{ color: C.sub, fontSize: 14, marginBottom: 16 }}>
+                  أضف الجد الأكبر ثم ابنِ الفروع منه
+                </div>
+                <button onClick={() => addPerson({ name: "الجد الأكبر" })} style={{
+                  background: C.gold, color: "#ffffff", border: "none", padding: "10px 22px",
+                  borderRadius: 8, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "'Tajawal'",
+                }}>+ أضف أول شخص</button>
+              </div>
+            </div>
+          )}
+
+          {/* zoom controls */}
+          <div style={{ position: "absolute", bottom: 16, left: 16, display: "flex", flexDirection: "column", gap: 6 }}>
+            <RoundBtn C={C} onClick={() => zoom(1.2)}>+</RoundBtn>
+            <RoundBtn C={C} onClick={() => zoom(0.83)}>−</RoundBtn>
+            <RoundBtn C={C} onClick={() => {
+              const r = canvasRef.current?.getBoundingClientRect();
+              const vw = r ? r.width : 900, vh = r ? r.height : 600;
+              const n0 = people[0] || { x: 0, y: 120 };
+              const s0 = 0.62;
+              setView({ s: s0, tx: vw / 2 - n0.x * s0, ty: Math.max(24, vh * 0.16) - n0.y * s0 });
+            }} title="إعادة الضبط">⟳</RoundBtn>
+          </div>
+
+          {/* search */}
+          <div style={{ position: "absolute", top: 14, right: 14, width: 230 }}>
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="بحث بالاسم…"
+              style={{
+                width: "100%", boxSizing: "border-box", padding: "9px 12px", borderRadius: 8,
+                border: `1px solid ${C.border}`, background: "rgba(255,255,255,.97)", color: C.parch,
+                fontFamily: "'Tajawal'", fontSize: 14, outline: "none",
+              }} />
+            {searchHits.length > 0 && (
+              <div style={{
+                marginTop: 4, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8,
+                maxHeight: 240, overflowY: "auto",
+              }}>
+                {searchHits.slice(0, 30).map(p => (
+                  <div key={p.id} onClick={() => focusPerson(p)} style={{
+                    padding: "8px 12px", cursor: "pointer", fontSize: 14, borderBottom: `1px solid ${C.border}`,
+                  }}>{p.name}{p.deceased ? " · رحمه الله" : ""}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Side panel */}
+        {showPanel && (
+          <div style={{
+            width: 320, flexShrink: 0, background: C.panel, borderRight: `1px solid ${C.border}`,
+            display: "flex", flexDirection: "column", zIndex: 20,
+          }}>
+            <div style={{ display: "flex", borderBottom: `1px solid ${C.border}` }}>
+              {[["edit", "تحرير"], ["log", `السجل (${log.length})`]].map(([k, lbl]) => (
+                <button key={k} onClick={() => setTab(k)} style={{
+                  flex: 1, padding: "12px 0", background: tab === k ? C.panel2 : "transparent",
+                  color: tab === k ? C.gold : C.sub, border: "none", borderBottom: tab === k ? `2px solid ${C.gold}` : "2px solid transparent",
+                  cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14, fontWeight: 600,
+                }}>{lbl}</button>
+              ))}
+            </div>
+
+            <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+              {tab === "edit" && (
+                selected ? (
+                  <EditPanel C={C} person={selected} photo={photos[selected.id]}
+                    people={people} edges={edges}
+                    onName={(v) => updatePerson(selected.id, { name: v })}
+                    onNameCommit={(v) => addLog(`تعديل الاسم إلى: ${v}`)}
+                    onNote={(v) => updatePerson(selected.id, { note: v })}
+                    onDeceased={(v) => updatePerson(selected.id, { deceased: v },
+                      v ? `تعليم متوفى: ${selected.name}` : `إلغاء تعليم المتوفى: ${selected.name}`)}
+                    onUpload={() => fileRef.current?.click()}
+                    onRemovePhoto={() => removePhoto(selected.id)}
+                    onAddChild={() => addChild(selected.id)}
+                    onAddParent={() => addParent(selected.id)}
+                    onDelete={() => deletePerson(selected.id)}
+                    onRemoveEdge={removeEdge}
+                    onSelect={(id) => { setSelectedId(id); }}
+                  />
+                ) : (
+                  <div style={{ color: C.sub, fontSize: 14, lineHeight: 1.9, textAlign: "center", marginTop: 30 }}>
+                    اختر شخصًا من الشجرة لتحريره،<br />أو اضغط "+ شخص" لإضافة فرد جديد.
+                    <div style={{ marginTop: 20, fontSize: 12, color: C.line, textAlign: "right", lineHeight: 2 }}>
+                      · اسحب الخلفية للتنقل<br />
+                      · اسحب أي بطاقة لتحريكها<br />
+                      · عجلة الفأرة للتكبير<br />
+                      · "ربط شخصين" لرسم خط بينهما
+                    </div>
+                  </div>
+                )
+              )}
+              {tab === "log" && (
+                <div>
+                  {log.length === 0 && <div style={{ color: C.sub, fontSize: 14 }}>لا توجد تعديلات بعد.</div>}
+                  {log.map(l => (
+                    <div key={l.id} style={{
+                      padding: "10px 0", borderBottom: `1px solid ${C.border}`,
+                    }}>
+                      <div style={{ fontSize: 14, color: C.parch }}>{l.text}</div>
+                      <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>{fmtTime(l.ts)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* hidden photo input */}
+      <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+        onChange={e => { if (selected) handlePhoto(selected.id, e.target.files[0]); e.target.value = ""; }} />
+
+      {loading && (
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: C.bg, zIndex: 50 }}>
+          <div style={{ color: C.gold, fontFamily: "'Amiri',serif", fontSize: 20 }}>جارٍ التحميل…</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ====================== Sub-components ======================
+function Btn({ children, onClick, active, C }) {
+  return (
+    <button onClick={onClick} style={{
+      background: active ? C.gold : "transparent", color: active ? "#ffffff" : C.parch,
+      border: `1px solid ${active ? C.gold : C.border}`, padding: "7px 14px", borderRadius: 7,
+      cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap",
+    }}>{children}</button>
+  );
+}
+function RoundBtn({ children, onClick, C, title }) {
+  return (
+    <button onClick={onClick} title={title} style={{
+      width: 38, height: 38, borderRadius: 9, background: "rgba(255,255,255,.96)", color: C.gold,
+      border: `1px solid ${C.border}`, cursor: "pointer", fontSize: 18, fontWeight: 700,
+    }}>{children}</button>
+  );
+}
+
+function EditPanel({ C, person, photo, people, edges, onName, onNameCommit, onNote, onDeceased,
+  onUpload, onRemovePhoto, onAddChild, onAddParent, onDelete, onRemoveEdge, onSelect }) {
+  const label = { fontSize: 12, color: C.sub, marginBottom: 5, display: "block" };
+  const inp = {
+    width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 7,
+    border: `1px solid ${C.border}`, background: C.panel2, color: C.parch,
+    fontFamily: "'Tajawal'", fontSize: 14, outline: "none", marginBottom: 14,
+  };
+  const parents = edges.filter(e => e.to === person.id);
+  const children = edges.filter(e => e.from === person.id);
+  const nameOf = (id) => people.find(p => p.id === id)?.name || "؟";
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 16 }}>
+        <div style={{
+          width: 96, height: 96, borderRadius: "50%", overflow: "hidden", border: `3px solid ${C.gold}`,
+          background: "#d8c9a8", display: "grid", placeItems: "center", marginBottom: 10,
+        }}>
+          {photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            : <span style={{ fontFamily: "'Amiri',serif", fontSize: 40, color: "#8a754a" }}>{person.name?.[0] || "؟"}</span>}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn C={C} onClick={onUpload}>{photo ? "تغيير الصورة" : "رفع صورة"}</Btn>
+          {photo && <Btn C={C} onClick={onRemovePhoto}>حذف الصورة</Btn>}
+        </div>
+      </div>
+
+      <label style={label}>الاسم</label>
+      <input value={person.name} onChange={e => onName(e.target.value)}
+        onBlur={e => onNameCommit(e.target.value)} style={inp} />
+
+      <label style={label}>ملاحظة (سنة الميلاد، الفرع…)</label>
+      <input value={person.note} onChange={e => onNote(e.target.value)} style={inp} />
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 14 }}>
+        <input type="checkbox" checked={!!person.deceased} onChange={e => onDeceased(e.target.checked)}
+          style={{ width: 17, height: 17, accentColor: C.gold }} />
+        متوفى (رحمه الله)
+      </label>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <Btn C={C} onClick={onAddParent}>+ والد</Btn>
+        <Btn C={C} onClick={onAddChild}>+ ابن / ابنة</Btn>
+      </div>
+
+      {(parents.length > 0 || children.length > 0) && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, color: C.gold, marginBottom: 8, fontWeight: 700 }}>الروابط</div>
+          {parents.map(e => (
+            <EdgeRow key={e.id} C={C} kind="والد" name={nameOf(e.from)}
+              onGo={() => onSelect(e.from)} onDel={() => onRemoveEdge(e.id)} />
+          ))}
+          {children.map(e => (
+            <EdgeRow key={e.id} C={C} kind="ابن" name={nameOf(e.to)}
+              onGo={() => onSelect(e.to)} onDel={() => onRemoveEdge(e.id)} />
+          ))}
+        </div>
+      )}
+
+      <button onClick={onDelete} style={{
+        width: "100%", padding: "10px", borderRadius: 7, border: `1px solid #e3b4ad`,
+        background: "transparent", color: "#c0392b", cursor: "pointer", fontFamily: "'Tajawal'",
+        fontSize: 14, fontWeight: 600,
+      }}>حذف هذا الشخص</button>
+    </div>
+  );
+}
+
+function EdgeRow({ C, kind, name, onGo, onDel }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "7px 10px", background: C.panel2, borderRadius: 7, marginBottom: 6,
+    }}>
+      <span onClick={onGo} style={{ cursor: "pointer", fontSize: 13 }}>
+        <span style={{ color: C.sub }}>{kind}: </span>{name}
+      </span>
+      <button onClick={onDel} style={{
+        background: "transparent", border: "none", color: "#c0392b", cursor: "pointer", fontSize: 12,
+      }}>إزالة الرابط</button>
+    </div>
+  );
+}
+
+
+(async () => {
+  try { const r = await fetch('./family-tree-data.json'); SEED = await r.json(); }
+  catch (e) { console.error('data load failed', e); }
+  const boot = document.getElementById('boot'); if (boot) boot.remove();
+  ReactDOM.createRoot(document.getElementById('root')).render(<FamilyTree/>);
+})();
+</script>
+</body>
+</html>
