@@ -901,7 +901,7 @@ function FamilyTree() {
     const c = centerWorld();
     const np = {
       id: uid(),
-      name: preset.name || "اسم جديد",
+      name: preset.name || "جديد",
       x: preset.x ?? c.x,
       y: preset.y ?? c.y,
       note: "",
@@ -1057,7 +1057,7 @@ function FamilyTree() {
     const child = addPerson({
       x: freeX(sibs.length ? Math.max(...sibs.map(sb => sb.x)) + NODE_W + 30 : parent.x, cy),
       y: cy,
-      name: gender === "f" ? "بنت جديدة" : "ابن جديد",
+      name: gender === "f" ? "بنت" : "ابن",
       gender,
       g: parent.g != null ? parent.g + 1 : undefined
     });
@@ -2320,7 +2320,7 @@ function FamilyTree() {
     }
   }, "أضف الجد الأكبر ثم ابنِ الفروع منه"), /*#__PURE__*/React.createElement("button", {
     onClick: () => addPerson({
-      name: "الجد الأكبر"
+      name: "الجد"
     }),
     style: {
       background: C.gold,
@@ -3930,9 +3930,9 @@ function EditPanel({
     onClick: onRemovePhoto
   }, "حذف الصورة"))), /*#__PURE__*/React.createElement("label", {
     style: label
-  }, "الاسم"), /*#__PURE__*/React.createElement("input", {
+  }, "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"), /*#__PURE__*/React.createElement("input", {
     value: person.name,
-    onChange: e => onName(e.target.value),
+    onChange: e => onName(e.target.value.replace(/\s+/g, "")),
     onBlur: e => onNameCommit(e.target.value),
     style: inp
   }), /*#__PURE__*/React.createElement("label", {
