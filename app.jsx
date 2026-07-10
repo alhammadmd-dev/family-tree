@@ -203,6 +203,15 @@ function FamilyTree() {
   const [showStats, setShowStats] = useState(false);
   const [showGallery, setShowGallery] = useState(false);
 
+  // view switcher: tree (collapsible, default) | list | focus | classic
+  const [viewMode, setViewModeRaw] = useState(() => {
+    try { return localStorage.getItem("ft:viewmode") || "tree"; } catch { return "tree"; }
+  });
+  const setViewMode = (m) => { setViewModeRaw(m); try { localStorage.setItem("ft:viewmode", m); } catch {} };
+  const [treeCollapsed, setTreeCollapsed] = useState(null);  // Set of collapsed node ids
+  const [listOpen, setListOpen] = useState(null);            // Set of expanded list rows
+  const [focusId, setFocusId] = useState(null);              // hourglass center
+
   const cloudLive = cloud === "live";
   const isAdmin = !!user && user.email === ADMIN_EMAIL;
   const isEditor = !!user;
@@ -225,6 +234,92 @@ function FamilyTree() {
 
   // test/debug handle (the tree data is public anyway)
   useEffect(() => { window.__ftPeople = people; }, [people]);
+
+  const treePosRef = useRef(null);
+  const mainRootRef = useRef(null);
+  const fitDoneRef = useRef("");
+
+  // helper: father-preferred ancestor chain computed from raw state (usable in effects)
+  const ancestorChainOf = (id) => {
+    const pbc = {}; edges.filter(e => e.type !== "spouse").forEach(e => (pbc[e.to] ||= []).push(e.from));
+    const byId = {}; people.forEach(p => { byId[p.id] = p; });
+    const anc = []; let c = id, guard = 0;
+    while (pbc[c] && guard++ < 25) {
+      const f = pbc[c].find(x => byId[x]?.gender !== "f") || pbc[c][0];
+      if (!f) break; anc.push(f); c = f;
+    }
+    return anc;
+  };
+
+  // default collapse/open state once data arrives: generations 0-2 visible, deeper folded
+  useEffect(() => {
+    if (loading || !people.length || treeCollapsed) return;
+    const pbc = {}, cm = {}, pp = {};
+    edges.filter(e => e.type !== "spouse").forEach(e => (pbc[e.to] ||= []).push(e.from));
+    const byId = {}; people.forEach(p => { byId[p.id] = p; });
+    for (const c in pbc) {
+      const f = pbc[c].find(x => byId[x]?.gender !== "f") || pbc[c][0];
+      pp[c] = f; (cm[f] ||= []).push(c);
+    }
+    const col = new Set(), open = new Set();
+    const walk = (id, d) => {
+      const ks = cm[id] || [];
+      if (ks.length) { if (d >= 3) col.add(id); if (d <= 1) open.add(id); }
+      if (d < 15) ks.forEach(k => walk(k, d + 1));
+    };
+    people.filter(p => !pp[p.id]).forEach(r => walk(r.id, 0));
+    setTreeCollapsed(col); setListOpen(open);
+  }, [loading, people, edges, treeCollapsed]);
+
+  // fit the viewport once per mode switch (deep links / reveals may override afterwards)
+  useEffect(() => { fitDoneRef.current = ""; }, [viewMode]);
+  useEffect(() => {
+    if (loading || fitDoneRef.current === viewMode) return;
+    const r = canvasRef.current?.getBoundingClientRect();
+    const w0 = r ? r.width : 900, h0 = r ? r.height : 600;
+    if (viewMode === "classic") {
+      const n0 = people[0]; if (!n0) return;
+      const s0 = w0 < 700 ? 1.1 : 0.62;
+      setView({ s: s0, tx: w0 / 2 - n0.x * s0, ty: Math.max(24, h0 * 0.16) - n0.y * s0 });
+    } else if (viewMode === "tree") {
+      const q = treePosRef.current, rid = mainRootRef.current;
+      if (!q || !rid || !q[rid]) return;
+      const s0 = w0 < 700 ? 0.85 : 0.95;
+      setView({ s: s0, tx: w0 / 2 - q[rid].x * s0, ty: 70 - q[rid].y * s0 });
+    } else if (viewMode === "focus") {
+      setView({ s: w0 < 700 ? 0.8 : 0.95, tx: w0 / 2, ty: h0 * 0.42 });
+    } else if (viewMode === "list") { /* nothing to fit */ }
+    fitDoneRef.current = viewMode;
+  }, [viewMode, loading, treeCollapsed, people]);
+
+  // reveal the selected person in the active view (expand ancestors, center/scroll)
+  useEffect(() => {
+    if (!selectedId || loading) return;
+    if (viewMode === "tree" && treeCollapsed) {
+      const anc = ancestorChainOf(selectedId);
+      if (anc.some(a => treeCollapsed.has(a))) {
+        const ns = new Set(treeCollapsed); anc.forEach(a => ns.delete(a));
+        setTreeCollapsed(ns); return; // effect re-runs and centers once layout is updated
+      }
+      const q = treePosRef.current?.[selectedId];
+      if (q) {
+        const r = canvasRef.current?.getBoundingClientRect();
+        const w0 = r ? r.width : 900, h0 = r ? r.height : 600;
+        setView(v => ({ ...v, tx: w0 / 2 - q.x * v.s, ty: (isMobile ? h0 * 0.24 : h0 * 0.4) - q.y * v.s }));
+      }
+    } else if (viewMode === "list" && listOpen) {
+      const anc = ancestorChainOf(selectedId);
+      if (anc.some(a => !listOpen.has(a))) {
+        const ns = new Set(listOpen); anc.forEach(a => ns.add(a));
+        setListOpen(ns);
+      }
+      setTimeout(() => {
+        document.getElementById("lrow-" + selectedId)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      }, 100);
+    } else if (viewMode === "focus") {
+      setFocusId(selectedId);
+    }
+  }, [selectedId, viewMode, treeCollapsed, listOpen, loading]);
 
   // ---------- Family mode flag (independent of data source) ----------
   useEffect(() => {
@@ -367,8 +462,12 @@ function FamilyTree() {
     const m = window.location.hash.match(/^#p=(.+)$/);
     const target = m && people.find(x => x.id === decodeURIComponent(m[1]));
     if (target && (target.gender !== "f" || familyMode)) {
-      setView({ s: 1, tx: vw0 / 2 - target.x, ty: vh0 / 2 - target.y });
       setSelectedId(target.id); setTab("view"); setShowPanel(true);
+      if (viewMode === "focus") setFocusId(target.id);
+      if (viewMode === "classic") {
+        setView({ s: 1, tx: vw0 / 2 - target.x, ty: vh0 / 2 - target.y });
+        fitDoneRef.current = "classic";
+      }
     }
   }, [loading, people, familyMode]);
 
@@ -388,10 +487,13 @@ function FamilyTree() {
       if (id === selectedId) return;
       const t = people.find(x => x.id === id);
       if (!t || (t.gender === "f" && !familyMode)) return;
-      const r = canvasRef.current?.getBoundingClientRect();
-      const w = r ? r.width : 900, h = r ? r.height : 600;
-      setView({ s: 1, tx: w / 2 - t.x, ty: h / 2 - t.y });
       setSelectedId(t.id); setTab("view"); setShowPanel(true);
+      if (viewMode === "focus") setFocusId(t.id);
+      if (viewMode === "classic") {
+        const r = canvasRef.current?.getBoundingClientRect();
+        const w = r ? r.width : 900, h = r ? r.height : 600;
+        setView({ s: 1, tx: w / 2 - t.x, ty: h / 2 - t.y });
+      }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -841,6 +943,81 @@ function FamilyTree() {
   const inWorld = (x, y) => x >= wx0 && x <= wx1 && y >= wy0 && y <= wy1;
   const drawnPeople = visPeople.filter(p => inWorld(p.x, p.y));
 
+  // ---------- shared genealogy structures for the alternative views ----------
+  // primary parent = father when both parents are linked, so each child appears once
+  const childMap = {}, primParent = {};
+  {
+    const parentsByChild = {};
+    visEdges.filter(e => e.type !== "spouse").forEach(e => (parentsByChild[e.to] ||= []).push(e.from));
+    for (const c in parentsByChild) {
+      if (!visIds.has(c)) continue;
+      const ps = parentsByChild[c].filter(id => visIds.has(id));
+      if (!ps.length) continue;
+      const father = ps.find(id => pmap[id]?.gender !== "f") || ps[0];
+      primParent[c] = father;
+      (childMap[father] ||= []).push(c);
+    }
+    for (const k in childMap) childMap[k].sort((a, b) => (pmap[a]?.x || 0) - (pmap[b]?.x || 0));
+  }
+  const kidsOf = (id) => childMap[id] || [];
+  const spousesOf = (id) => visEdges
+    .filter(e => e.type === "spouse" && (e.from === id || e.to === id))
+    .map(e => (e.from === id ? e.to : e.from)).filter(x => visIds.has(x));
+  const otherParentsOf = (id) => visEdges
+    .filter(e => e.type !== "spouse" && e.to === id && e.from !== primParent[id])
+    .map(e => e.from).filter(x => visIds.has(x));
+  const descCount = (id) => kidsOf(id).reduce((a, c) => a + 1 + descCount(c), 0);
+  const isSpouseOnly = (p) => !primParent[p.id] && !kidsOf(p.id).length && spousesOf(p.id).length > 0;
+  const treeRoots = visPeople.filter(p => !primParent[p.id] && !isSpouseOnly(p))
+    .sort((a, b) => descCount(b.id) - descCount(a.id));
+  const mainRoot = treeRoots[0]?.id || null;
+  const depthOf = (id) => { let d = 0, c = id; while (primParent[c] && d < 20) { c = primParent[c]; d++; } return d; };
+
+  // tidy layout for the collapsible tree (leaf counting, spans all roots)
+  const TREE_DX = 118, TREE_DY = 168;
+  const tidyLayout = (collapsedSet) => {
+    const pos = {}; let cursor = 0;
+    const walk = (id, depth) => {
+      const kids = collapsedSet.has(id) ? [] : kidsOf(id);
+      if (!kids.length) { pos[id] = { x: cursor++ * TREE_DX, y: depth * TREE_DY }; return pos[id].x; }
+      const xs = kids.map(k => walk(k, depth + 1));
+      pos[id] = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: depth * TREE_DY };
+      return pos[id].x;
+    };
+    treeRoots.forEach(r => { walk(r.id, 0); cursor += 1.5; });
+    return pos;
+  };
+  const treePos = viewMode === "tree" && treeCollapsed ? tidyLayout(treeCollapsed) : null;
+  treePosRef.current = treePos || treePosRef.current;
+  mainRootRef.current = mainRoot;
+
+  // hourglass layout around focusId
+  const hgFocus = viewMode === "focus" ? (focusId && visIds.has(focusId) ? focusId : (selectedId && visIds.has(selectedId) ? selectedId : mainRoot)) : null;
+  let hgPos = null, hgLinks = null, hgSpouses = null, hgMothers = null;
+  if (viewMode === "focus" && hgFocus) {
+    hgPos = {}; hgLinks = []; hgSpouses = []; hgMothers = [];
+    let cur = hgFocus, d = 0;
+    while (primParent[cur] && d < 15) {
+      const f = primParent[cur]; d++;
+      hgPos[f] = { x: 0, y: -d * TREE_DY };
+      hgLinks.push({ from: f, to: cur });
+      otherParentsOf(cur).forEach((m, i) => { hgPos[m] = { x: -(i + 1) * 150, y: -d * TREE_DY }; hgMothers.push(m); });
+      cur = f;
+    }
+    let cursor = 0;
+    const walk = (id, depth) => {
+      const kids = kidsOf(id);
+      if (!kids.length) { hgPos[id] = { x: cursor++ * TREE_DX, y: depth * TREE_DY }; return hgPos[id].x; }
+      const xs = kids.map(k => { const r = walk(k, depth + 1); hgLinks.push({ from: id, to: k }); return r; });
+      hgPos[id] = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: depth * TREE_DY };
+      return hgPos[id].x;
+    };
+    walk(hgFocus, 0);
+    const off = hgPos[hgFocus].x;
+    for (const id in hgPos) if (hgPos[id].y >= 0) hgPos[id].x -= off;
+    spousesOf(hgFocus).forEach((sp, i) => { hgPos[sp] = { x: 150 + i * 130, y: 0 }; hgSpouses.push(sp); });
+  }
+
   const C = {
     bg: "#f6f4ee", panel: "#ffffff", panel2: "#f1ede4",
     gold: "#2f7d62", goldSoft: "#3f8f73", parch: "#2b2a25",
@@ -848,10 +1025,14 @@ function FamilyTree() {
   };
 
   const focusPerson = (p) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    setView({ s: 1, tx: rect.width / 2 - p.x, ty: rect.height / 2 - p.y });
-    setSelectedId(p.id); setSearch("");
-    setTab("view"); setShowPanel(true);
+    setSelectedId(p.id); setSearch(""); setTab("view"); setShowPanel(true);
+    if (viewMode === "classic") {
+      const rect = canvasRef.current.getBoundingClientRect();
+      setView({ s: 1, tx: rect.width / 2 - p.x, ty: rect.height / 2 - p.y });
+    } else if (viewMode === "focus") {
+      setFocusId(p.id);
+    }
+    // tree & list modes: the reveal effect expands ancestors and centers/scrolls
   };
 
   return (
@@ -923,6 +1104,22 @@ function FamilyTree() {
         </div>
       )}
 
+      {/* view switcher */}
+      <div style={{
+        display: "flex", gap: 6, padding: "7px 12px", borderBottom: `1px solid ${C.border}`,
+        background: C.panel, overflowX: "auto", flexShrink: 0, zIndex: 28,
+      }}>
+        {[["tree", "🌳 الشجرة"], ["list", "📋 القائمة"], ["focus", "👤 المحور"], ["classic", "🗺️ الكلاسيكي"]].map(([k, l]) => (
+          <button key={k} onClick={() => setViewMode(k)} style={{
+            padding: "6px 14px", borderRadius: 16, whiteSpace: "nowrap", cursor: "pointer",
+            fontFamily: "'Tajawal'", fontSize: 13, fontWeight: 700, flexShrink: 0,
+            border: `1px solid ${viewMode === k ? C.gold : C.border}`,
+            background: viewMode === k ? C.gold : "transparent",
+            color: viewMode === k ? "#fff" : C.sub,
+          }}>{l}</button>
+        ))}
+      </div>
+
       {updateAvail && !cloudLive && (
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
@@ -945,25 +1142,28 @@ function FamilyTree() {
         {/* Canvas */}
         <div
           ref={canvasRef}
-          onPointerDown={onCanvasPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
-          onWheel={onWheel}
+          onPointerDown={viewMode === "list" ? undefined : onCanvasPointerDown}
+          onPointerMove={viewMode === "list" ? undefined : onPointerMove}
+          onPointerUp={viewMode === "list" ? undefined : onPointerUp}
+          onPointerLeave={viewMode === "list" ? undefined : onPointerUp}
+          onWheel={viewMode === "list" ? undefined : onWheel}
           style={{
-            flex: 1, position: "relative", overflow: "hidden", cursor: "grab",
+            flex: 1, position: "relative", overflow: "hidden",
+            cursor: viewMode === "list" ? "default" : "grab",
             backgroundImage:
               "radial-gradient(circle at 20% 30%, #eaf2ee 0, transparent 55%), radial-gradient(circle at 80% 70%, #f0ece2 0, transparent 55%)",
             backgroundColor: C.bg,
-            touchAction: "none",
+            touchAction: viewMode === "list" ? "auto" : "none",
           }}
         >
 
+          {viewMode !== "list" && (
           <div style={{
             position: "absolute", top: 0, left: 0,
             transform: `translate(${view.tx}px,${view.ty}px) scale(${view.s})`,
             transformOrigin: "0 0",
           }}>
+            {viewMode === "classic" && (<React.Fragment>
             {/* generation tier bands + labels */}
             {(() => {
               if (!visPeople.length) return null;
@@ -1097,7 +1297,158 @@ function FamilyTree() {
                 </div>
               );
             })}
+            </React.Fragment>)}
+
+            {/* collapsible auto-laid tree */}
+            {viewMode === "tree" && treePos && (() => {
+              const entries = Object.entries(treePos);
+              const paths = [];
+              for (const [id, q] of entries) {
+                if (treeCollapsed.has(id)) continue;
+                for (const k of kidsOf(id)) {
+                  const kq = treePos[k]; if (!kq) continue;
+                  const gx0 = Math.min(q.x, kq.x), gx1 = Math.max(q.x, kq.x);
+                  if (gx1 < wx0 || gx0 > wx1 || kq.y < wy0 || q.y > wy1) continue;
+                  const midY = (q.y + 32 + kq.y - 34) / 2;
+                  paths.push(<path key={id + "-" + k} d={`M${q.x},${q.y + 30} V${midY} H${kq.x} V${kq.y - 32}`}
+                    fill="none" stroke={C.line} strokeWidth={1.5} />);
+                }
+              }
+              return (<React.Fragment>
+                <svg style={{ position: "absolute", overflow: "visible", width: 1, height: 1, pointerEvents: "none" }}>{paths}</svg>
+                {entries.filter(([, q]) => inWorld(q.x, q.y)).map(([id, q]) => {
+                  const p = pmap[id]; if (!p) return null;
+                  const kn = kidsOf(id).length;
+                  const col = treeCollapsed.has(id);
+                  return (
+                    <React.Fragment key={id}>
+                      <MiniNode C={C} p={p} x={q.x} y={q.y} photo={photos[id]}
+                        selected={id === selectedId} onTap={(pid) => onNodeClick(pid)} />
+                      {kn > 0 && (
+                        <div onClick={(e) => {
+                          e.stopPropagation();
+                          const ns = new Set(treeCollapsed);
+                          col ? ns.delete(id) : ns.add(id);
+                          // keep the tapped node visually anchored: the whole tree re-lays-out
+                          // on expand/collapse, so compensate the pan for this node's x shift
+                          const np = tidyLayout(ns);
+                          const dx = (np[id]?.x ?? q.x) - q.x;
+                          setTreeCollapsed(ns);
+                          if (dx) setView(v => ({ ...v, tx: v.tx - dx * v.s }));
+                        }} style={{
+                          position: "absolute", left: q.x, top: q.y + 64, transform: "translate(-50%,0)",
+                          minWidth: 28, height: 24, padding: "0 8px", borderRadius: 12,
+                          background: col ? C.gold : C.panel, color: col ? "#fff" : C.sub,
+                          border: `1px solid ${col ? C.gold : C.border}`, fontSize: 11.5, fontWeight: 700,
+                          display: "grid", placeItems: "center", cursor: "pointer",
+                          fontFamily: "'Tajawal'", zIndex: 2, whiteSpace: "nowrap",
+                        }}>{col ? `⊕ ${descCount(id)}` : "−"}</div>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </React.Fragment>);
+            })()}
+
+            {/* hourglass person-focus view */}
+            {viewMode === "focus" && hgPos && (() => {
+              const paths = hgLinks.map((l, i) => {
+                const a = hgPos[l.from], b = hgPos[l.to]; if (!a || !b) return null;
+                const midY = (a.y + 32 + b.y - 34) / 2;
+                return <path key={i} d={`M${a.x},${a.y + 30} V${midY} H${b.x} V${b.y - 32}`}
+                  fill="none" stroke={l.from === primParent[hgFocus] || l.to === hgFocus ? C.gold : C.line}
+                  strokeWidth={l.to === hgFocus ? 2.4 : 1.5} />;
+              });
+              hgSpouses.forEach((sp, i) => {
+                const b = hgPos[sp];
+                paths.push(<line key={"s1" + i} x1={46} y1={-4} x2={b.x - 32} y2={-4} stroke="#c98aa0" strokeWidth={1.5} />);
+                paths.push(<line key={"s2" + i} x1={46} y1={4} x2={b.x - 32} y2={4} stroke="#c98aa0" strokeWidth={1.5} />);
+              });
+              hgMothers.forEach((m, i) => {
+                const a = hgPos[m];
+                paths.push(<line key={"m" + i} x1={a.x + 32} y1={a.y} x2={-4} y2={a.y} stroke="#c98aa0" strokeWidth={1.2} strokeDasharray="4 3" />);
+              });
+              return (<React.Fragment>
+                <svg style={{ position: "absolute", overflow: "visible", width: 1, height: 1, pointerEvents: "none" }}>{paths}</svg>
+                {Object.entries(hgPos).filter(([, q]) => inWorld(q.x, q.y)).map(([id, q]) => (
+                  <MiniNode key={id} C={C} p={pmap[id]} x={q.x} y={q.y} photo={photos[id]}
+                    selected={id === selectedId} focusCard={id === hgFocus}
+                    onTap={(pid) => {
+                      if (linkMode) return onNodeClick(pid);
+                      setFocusId(pid); setSelectedId(pid);
+                    }} />
+                ))}
+                <div onClick={() => { setSelectedId(hgFocus); setTab("view"); setShowPanel(true); }} style={{
+                  position: "absolute", left: 0, top: 96, transform: "translate(-50%,0)",
+                  background: C.gold, color: "#fff", borderRadius: 14, padding: "5px 16px",
+                  fontSize: 12.5, fontWeight: 700, fontFamily: "'Tajawal'", cursor: "pointer",
+                  whiteSpace: "nowrap", zIndex: 2,
+                }}>عرض الملف</div>
+              </React.Fragment>);
+            })()}
           </div>
+          )}
+
+          {/* hierarchical list view */}
+          {viewMode === "list" && listOpen && (
+            <div style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "10px 10px 90px", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ maxWidth: 640, margin: "0 auto" }}>
+                {(() => {
+                  const out = [];
+                  const emit = (id, depth) => {
+                    const p = pmap[id]; if (!p || !visIds.has(id)) return;
+                    const kids = kidsOf(id); const open = listOpen.has(id);
+                    out.push(
+                      <div key={id} id={"lrow-" + id} style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        padding: "6px 2px", marginRight: Math.min(depth, 7) * 16, borderRadius: 8,
+                        background: id === selectedId ? "rgba(47,125,98,.10)" : "transparent",
+                      }}>
+                        <div onClick={() => {
+                          if (!kids.length) return;
+                          const ns = new Set(listOpen); open ? ns.delete(id) : ns.add(id);
+                          setListOpen(ns);
+                        }} style={{
+                          width: 36, height: 36, flexShrink: 0, display: "grid", placeItems: "center",
+                          color: kids.length ? C.gold : C.border, fontSize: 11,
+                          cursor: kids.length ? "pointer" : "default",
+                          transform: open ? "rotate(-90deg)" : "none", transition: "transform .15s",
+                        }}>{kids.length ? "◀" : "·"}</div>
+                        <div onClick={() => onNodeClick(id)}
+                          style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, cursor: "pointer" }}>
+                          <div style={{
+                            width: 38, height: 38, borderRadius: "50%", overflow: "hidden", flexShrink: 0,
+                            border: `2px ${p.deceased ? "dashed" : "solid"} ${p.gender === "f" ? "#b06a84" : C.goldSoft}`,
+                            background: "#e9e4d8", display: "grid", placeItems: "center",
+                          }}>
+                            {photos[id]
+                              ? <img src={photos[id]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                              : <span style={{ fontFamily: "'Amiri',serif", fontSize: 17, color: "#8c857a" }}>{p.name?.[0] || "؟"}</span>}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{
+                              fontFamily: "'Amiri',serif", fontWeight: 700, fontSize: 15.5, color: "#2c2415",
+                              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                            }}>
+                              {p.name}{p.nickname ? <span style={{ color: C.sub, fontSize: 11.5, fontFamily: "'Tajawal'" }}> ({p.nickname})</span> : null}
+                            </div>
+                            <div style={{ fontSize: 11, color: C.sub, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {p.deceased ? mercy(p) + " · " : ""}
+                              {kids.length ? `${descCount(id)} من الذرية` : "بلا ذرية"}
+                              {spousesOf(id).map(sp => " · ⚭ " + (pmap[sp]?.name || "")).join("")}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                    if (open) kids.forEach(k => emit(k, depth + 1));
+                  };
+                  treeRoots.forEach(r => emit(r.id, 0));
+                  return out;
+                })()}
+              </div>
+            </div>
+          )}
 
           {/* empty state */}
           {!loading && people.length === 0 && (
@@ -1119,24 +1470,37 @@ function FamilyTree() {
             </div>
           )}
 
-          {/* minimap */}
-          {!loading && visPeople.length > 0 && !(isMobile && showPanel) && (
-            <Minimap C={C} people={visPeople} view={view} vw={vw} vh={vh}
+          {/* minimap (classic + tree modes) */}
+          {!loading && visPeople.length > 0 && !(isMobile && showPanel)
+            && (viewMode === "classic" || (viewMode === "tree" && treePos)) && (
+            <Minimap C={C}
+              people={viewMode === "classic" ? visPeople
+                : Object.entries(treePos).map(([id, q]) => ({ x: q.x, y: q.y, gender: pmap[id]?.gender }))}
+              view={view} vw={vw} vh={vh}
               onJump={(wx, wy) => setView(v => ({ ...v, tx: vw / 2 - wx * v.s, ty: vh / 2 - wy * v.s }))} />
           )}
 
           {/* zoom controls */}
+          {viewMode !== "list" && (
           <div style={{ position: "absolute", bottom: 16, left: 16, display: "flex", flexDirection: "column", gap: 6 }}>
             <RoundBtn C={C} onClick={() => zoom(1.2)}>+</RoundBtn>
             <RoundBtn C={C} onClick={() => zoom(0.83)}>−</RoundBtn>
             <RoundBtn C={C} onClick={() => {
               const r = canvasRef.current?.getBoundingClientRect();
-              const vw = r ? r.width : 900, vh = r ? r.height : 600;
-              const n0 = people[0] || { x: 0, y: 120 };
-              const s0 = vw < 700 ? 1.1 : 0.62;
-              setView({ s: s0, tx: vw / 2 - n0.x * s0, ty: Math.max(24, vh * 0.16) - n0.y * s0 });
+              const w0 = r ? r.width : 900, h0 = r ? r.height : 600;
+              if (viewMode === "tree" && treePos && mainRoot && treePos[mainRoot]) {
+                const s0 = w0 < 700 ? 0.85 : 0.95;
+                setView({ s: s0, tx: w0 / 2 - treePos[mainRoot].x * s0, ty: 70 - treePos[mainRoot].y * s0 });
+              } else if (viewMode === "focus") {
+                setView({ s: w0 < 700 ? 0.8 : 0.95, tx: w0 / 2, ty: h0 * 0.42 });
+              } else {
+                const n0 = people[0] || { x: 0, y: 120 };
+                const s0 = w0 < 700 ? 1.1 : 0.62;
+                setView({ s: s0, tx: w0 / 2 - n0.x * s0, ty: Math.max(24, h0 * 0.16) - n0.y * s0 });
+              }
             }} title="إعادة الضبط">⟳</RoundBtn>
           </div>
+          )}
 
           {/* search */}
           <div style={{ position: "absolute", top: 14, right: 14, width: 230 }}>
@@ -1763,6 +2127,38 @@ function AuthGate({ C, onSignIn }) {
           cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14, fontWeight: 700, marginTop: 8,
         }}>تسجيل الدخول بحساب Google</button>
       </div>
+    </div>
+  );
+}
+
+// compact avatar node used by the tree and focus views (anchor = avatar center)
+function MiniNode({ C, p, x, y, photo, selected, focusCard, onTap }) {
+  const isF = p.gender === "f";
+  const ring = selected ? C.gold : (isF ? "#b06a84" : C.goldSoft);
+  const size = focusCard ? 84 : 56;
+  return (
+    <div onClick={(e) => { e.stopPropagation(); onTap && onTap(p.id); }} style={{
+      position: "absolute", left: x, top: y, transform: `translate(-50%, -${size / 2}px)`,
+      width: 112, textAlign: "center", cursor: "pointer", userSelect: "none",
+    }}>
+      <div style={{
+        width: size, height: size, margin: "0 auto", borderRadius: "50%", overflow: "hidden",
+        border: `${selected || focusCard ? 3 : 2}px ${p.deceased ? "dashed" : "solid"} ${ring}`,
+        background: "#e9e4d8", display: "grid", placeItems: "center",
+        boxShadow: selected ? "0 0 0 4px rgba(47,125,98,.22)" : "0 2px 8px rgba(0,0,0,.12)",
+      }}>
+        {photo
+          ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          : <span style={{ fontFamily: "'Amiri',serif", fontSize: size * 0.42, color: "#8c857a" }}>{p.name?.[0] || "؟"}</span>}
+      </div>
+      <div style={{
+        fontFamily: "'Amiri',serif", fontWeight: 700, fontSize: focusCard ? 16 : 13, marginTop: 3,
+        lineHeight: 1.25, color: "#2c2415", overflow: "hidden", display: "-webkit-box",
+        WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+      }}>{p.name}</div>
+      {p.deceased && (
+        <div style={{ fontSize: 9, color: "#7a6a47", fontFamily: "'Tajawal'" }}>{mercy(p)}</div>
+      )}
     </div>
   );
 }
