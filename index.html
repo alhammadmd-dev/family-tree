@@ -9,7 +9,7 @@
 #boot{position:fixed;inset:0;display:grid;place-items:center;color:#2f7d62;font-size:20px;font-family:serif}</style>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js" crossorigin></script>
 </head>
 <body>
 <div id="root"><div id="boot">جارٍ التحميل…</div></div>
@@ -54,7 +54,36 @@ const store = {
 
 const TREE_KEY = "ft:tree";
 const LOG_KEY = "ft:log";
+const FAMILY_KEY = "ft:family";
+const SEEDV_KEY = "ft:seedv";
 const photoKey = (id) => `ft:photo:${id}`;
+
+// family mode passcode — stored as a SHA-256 hash only.
+// to change the code: open the browser console and run  await sha256hex("الرمز الجديد")
+// then paste the result here.
+const FAMILY_CODE_HASH = "cf0718bf938dd7cbcc42d8d381d15172dc001f5595be34d6ea557004524d149d";
+async function sha256hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s)));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+window.sha256hex = sha256hex;
+
+// Arabic-insensitive matching (hamza forms, taa marbuta, alef maqsura, diacritics)
+const normAr = (s) => String(s || "")
+  .replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").replace(/ى/g, "ي")
+  .replace(/[ً-ْٰ]/g, "").trim();
+
+const yearOf = (d) => { const m = String(d || "").match(/\d{4}/); return m ? +m[0] : null; };
+function ageOf(p) {
+  const by = yearOf(p.dob); if (by == null) return null;
+  const ey = p.deceased ? yearOf(p.dod) : new Date().getFullYear();
+  return ey != null && ey >= by ? ey - by : null;
+}
+const mercy = (p) => p.gender === "f" ? "رحمها الله" : "رحمه الله";
+
+const waLink = (v) => { const d = String(v || "").replace(/\D/g, ""); return d ? `https://wa.me/${d}` : null; };
+const liLink = (v) => { v = String(v || "").trim(); return !v ? null : (/^https?:/.test(v) ? v : `https://www.linkedin.com/in/${encodeURIComponent(v)}`); };
+const twLink = (v) => { v = String(v || "").trim().replace(/^@/, ""); return !v ? null : (/^https?:/.test(v) ? v : `https://x.com/${v}`); };
 
 // ====== Seed data (from transcription) ======
 
@@ -106,10 +135,13 @@ function FamilyTree() {
   const [radialRoot, setRadialRoot] = useState(null);
   const [linkMode, setLinkMode] = useState(false);
   const [linkFrom, setLinkFrom] = useState(null);
-  const [tab, setTab] = useState("edit"); // edit | log
+  const [tab, setTab] = useState("view"); // view | edit | log
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [showPanel, setShowPanel] = useState(false);
+  const [familyMode, setFamilyMode] = useState(false);
+  const [showUnlock, setShowUnlock] = useState(false);
+  const [updateAvail, setUpdateAvail] = useState(false);
 
   const [view, setView] = useState({ s: 1, tx: 0, ty: 0 });
   const loadedRef = useRef(false);
@@ -142,6 +174,10 @@ function FamilyTree() {
       let logArr = [];
       if (lg) { try { logArr = JSON.parse(lg) || []; } catch {} }
 
+      // family mode: unlocked previously on this device with the current code
+      const fm = await store.get(FAMILY_KEY);
+      if (fm === FAMILY_CODE_HASH) setFamilyMode(true);
+
       // First run (no stored data): seed from the transcription
       let seeded = false;
       if (p.length === 0 && e.length === 0) {
@@ -154,8 +190,13 @@ function FamilyTree() {
 
       if (seeded) {
         store.set(TREE_KEY, JSON.stringify({ people: p, edges: e }));
+        store.set(SEEDV_KEY, String(SEED.version || 1));
         logArr = [{ id: "seed", ts: Date.now(), text: `تعبئة الشجرة من التفريغ (${p.length} فرد)` }];
         store.set(LOG_KEY, JSON.stringify(logArr));
+      } else {
+        // published data is newer than what this device was seeded with
+        const sv = +(await store.get(SEEDV_KEY)) || 1;
+        if ((SEED.version || 1) > sv) setUpdateAvail(true);
       }
       setLog(logArr);
 
@@ -200,6 +241,33 @@ function FamilyTree() {
     });
   }, []);
 
+  // ====================== Family mode ======================
+  const tryUnlock = async (code) => {
+    const h = await sha256hex(code);
+    if (h !== FAMILY_CODE_HASH) return false;
+    setFamilyMode(true); setShowUnlock(false);
+    store.set(FAMILY_KEY, h);
+    addLog("تفعيل الوضع العائلي");
+    return true;
+  };
+  const lockFamily = () => {
+    setFamilyMode(false);
+    store.del(FAMILY_KEY);
+    setSelectedId(id => { const p = people.find(x => x.id === id); return p?.gender === "f" ? null : id; });
+    addLog("قفل الوضع العائلي");
+  };
+
+  const applySeedUpdate = () => {
+    if (!window.confirm("سيتم استبدال نسختك المحلية بالنسخة الرسمية الجديدة. تعديلاتك المحلية على الأسماء والروابط ستُفقد (صورك المرفوعة تبقى). هل تريد المتابعة؟")) return;
+    const p = SEED.people.map(n => ({ ...n }));
+    const e = SEED.edges.map(x => ({ ...x }));
+    setPeople(p); setEdges(e); setSelectedId(null);
+    store.set(TREE_KEY, JSON.stringify({ people: p, edges: e }));
+    store.set(SEEDV_KEY, String(SEED.version || 1));
+    setUpdateAvail(false);
+    addLog(`تحديث الشجرة إلى النسخة الرسمية (v${SEED.version || 1})`);
+  };
+
   // ====================== Actions ======================
   const centerWorld = () => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -214,6 +282,8 @@ function FamilyTree() {
       name: preset.name || "اسم جديد",
       x: preset.x ?? c.x, y: preset.y ?? c.y,
       note: "", deceased: false,
+      ...(preset.gender ? { gender: preset.gender } : {}),
+      ...(preset.g != null ? { g: preset.g } : {}),
     };
     setPeople(prev => [...prev, np]);
     setSelectedId(np.id);
@@ -239,13 +309,13 @@ function FamilyTree() {
     addLog(`حذف الشخص: ${p.name}`);
   };
 
-  const addEdge = (from, to) => {
+  const addEdge = (from, to, type) => {
     if (from === to) return;
     if (edges.some(e => e.from === from && e.to === to)) return;
-    setEdges(prev => [...prev, { id: uid(), from, to }]);
+    setEdges(prev => [...prev, { id: uid(), from, to, ...(type && type !== "parent" ? { type } : {}) }]);
     const a = people.find(p => p.id === from)?.name || "";
     const b = people.find(p => p.id === to)?.name || "";
-    addLog(`إضافة رابط: ${a} ← ${b}`);
+    addLog(type === "spouse" ? `إضافة رابط زواج: ${a} ↔ ${b}` : `إضافة رابط: ${a} ← ${b}`);
   };
 
   const removeEdge = (eid) => {
@@ -257,20 +327,41 @@ function FamilyTree() {
     addLog(`حذف رابط: ${a} ← ${b}`);
   };
 
-  const addChild = (parentId) => {
+  const addChild = (parentId, gender = "m") => {
     const parent = people.find(p => p.id === parentId);
     if (!parent) return;
-    const child = addPerson({ x: parent.x + 30, y: parent.y + 200, name: "ابن / ابنة" });
+    const child = addPerson({
+      x: parent.x + 30, y: parent.y + 250,
+      name: gender === "f" ? "بنت جديدة" : "ابن جديد",
+      gender, g: parent.g != null ? parent.g + 1 : undefined,
+    });
     setEdges(prev => [...prev, { id: uid(), from: parentId, to: child.id }]);
-    addLog(`ربط ابن جديد بـ ${parent.name}`);
+    addLog(`ربط ${gender === "f" ? "بنت جديدة" : "ابن جديد"} بـ ${parent.name}`);
   };
 
-  const addParent = (childId) => {
+  const addParent = (childId, gender = "m") => {
     const child = people.find(p => p.id === childId);
     if (!child) return;
-    const parent = addPerson({ x: child.x - 30, y: child.y - 200, name: "والد / والدة" });
+    const parent = addPerson({
+      x: child.x - 30, y: child.y - 250,
+      name: gender === "f" ? "والدة" : "والد",
+      gender, g: child.g != null ? child.g - 1 : undefined,
+    });
     setEdges(prev => [...prev, { id: uid(), from: parent.id, to: childId }]);
-    addLog(`ربط والد جديد بـ ${child.name}`);
+    addLog(`ربط ${gender === "f" ? "والدة" : "والد"} بـ ${child.name}`);
+  };
+
+  const addSpouse = (personId) => {
+    const p0 = people.find(p => p.id === personId);
+    if (!p0) return;
+    const gender = p0.gender === "f" ? "m" : "f";
+    const sp = addPerson({
+      x: p0.x + NODE_W + 40, y: p0.y,
+      name: gender === "f" ? "زوجة" : "زوج",
+      gender, g: p0.g,
+    });
+    setEdges(prev => [...prev, { id: uid(), from: personId, to: sp.id, type: "spouse" }]);
+    addLog(`ربط ${gender === "f" ? "زوجة" : "زوج"} بـ ${p0.name}`);
   };
 
   const handlePhoto = async (id, file) => {
@@ -296,7 +387,7 @@ function FamilyTree() {
       else { addEdge(linkFrom, id); setLinkFrom(null); setLinkMode(false); }
       return;
     }
-    setSelectedId(id); setTab("edit"); setShowPanel(true);
+    setSelectedId(id); setTab("view"); setShowPanel(true);
   };
 
   // ====================== Pointer: drag node / pan ======================
@@ -381,9 +472,16 @@ function FamilyTree() {
 
   // ====================== Render ======================
   const pmap = {}; for (const _p of people) pmap[_p.id] = _p;
-  const selected = people.find(p => p.id === selectedId);
-  const searchHits = search.trim()
-    ? people.filter(p => p.name.includes(search.trim()))
+
+  // outside family mode the female layer is hidden entirely
+  const visPeople = familyMode ? people : people.filter(p => p.gender !== "f");
+  const visIds = new Set(visPeople.map(p => p.id));
+  const visEdges = edges.filter(e => visIds.has(e.from) && visIds.has(e.to));
+
+  const selected = visPeople.find(p => p.id === selectedId);
+  const q = normAr(search);
+  const searchHits = q
+    ? visPeople.filter(p => normAr(p.name).includes(q) || normAr(p.nickname).includes(q))
     : [];
 
   const C = {
@@ -396,6 +494,7 @@ function FamilyTree() {
     const rect = canvasRef.current.getBoundingClientRect();
     setView({ s: 1, tx: rect.width / 2 - p.x, ty: rect.height / 2 - p.y });
     setSelectedId(p.id); setSearch("");
+    setTab("view"); setShowPanel(true);
   };
 
   return (
@@ -421,11 +520,14 @@ function FamilyTree() {
               شجرة العائلة
             </div>
             <div style={{ fontSize: 11, color: C.sub }}>
-              {people.length} فرد · {edges.length} رابط
+              {visPeople.length} فرد · {visEdges.length} رابط
             </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Btn C={C} active={familyMode} onClick={() => familyMode ? lockFamily() : setShowUnlock(true)}>
+            {familyMode ? "🔓 الوضع العائلي" : "🔒 الوضع العائلي"}
+          </Btn>
           <Btn C={C} onClick={() => addPerson()}>+ شخص</Btn>
           <Btn C={C} active={linkMode} onClick={() => { setLinkMode(m => !m); setLinkFrom(null); }}>
             {linkMode ? (linkFrom ? "اختر الثاني…" : "اختر الأول…") : "ربط شخصين"}
@@ -437,6 +539,24 @@ function FamilyTree() {
             onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
         </div>
       </div>
+
+      {updateAvail && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
+          padding: "8px 14px", background: "#fdf3dd", borderBottom: "1px solid #ecd9ac",
+          fontSize: 13, color: "#7a5b16", flexShrink: 0, zIndex: 29,
+        }}>
+          صدرت نسخة رسمية أحدث من الشجرة.
+          <button onClick={applySeedUpdate} style={{
+            background: C.gold, color: "#fff", border: "none", padding: "5px 14px",
+            borderRadius: 6, cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 13, fontWeight: 600,
+          }}>تحديث الآن</button>
+          <button onClick={() => setUpdateAvail(false)} style={{
+            background: "transparent", color: "#7a5b16", border: "none", cursor: "pointer",
+            fontFamily: "'Tajawal'", fontSize: 13, textDecoration: "underline",
+          }}>لاحقًا</button>
+        </div>
+      )}
 
       <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
         {/* Canvas */}
@@ -463,11 +583,11 @@ function FamilyTree() {
           }}>
             {/* generation tier bands + labels */}
             {(() => {
-              if (!people.length) return null;
+              if (!visPeople.length) return null;
               const byId = pmap;
-              const xs = people.map(p => p.x);
+              const xs = visPeople.map(p => p.x);
               const minX = Math.min(...xs) - 240, maxX = Math.max(...xs) + 240;
-              const maxG = people.reduce((m, p) => Math.max(m, p.g || 0), 0);
+              const maxG = visPeople.reduce((m, p) => Math.max(m, p.g || 0), 0);
               const ord = ["الأول","الثاني","الثالث","الرابع","الخامس","السادس","السابع","الثامن","التاسع","العاشر"];
               const bands = [];
               for (let g = 0; g <= maxG; g++) {
@@ -496,8 +616,20 @@ function FamilyTree() {
               {(() => {
                 const byId = pmap;
                 const kids = {};
-                edges.forEach(e => { (kids[e.from] = kids[e.from] || []).push(e.to); });
+                visEdges.filter(e => e.type !== "spouse")
+                  .forEach(e => { (kids[e.from] = kids[e.from] || []).push(e.to); });
                 const out = [];
+                // marriage links: double horizontal line between spouses in the same tier
+                visEdges.filter(e => e.type === "spouse").forEach(e => {
+                  const a = byId[e.from], b = byId[e.to];
+                  if (!a || !b) return;
+                  const [l, r] = a.x <= b.x ? [a, b] : [b, a];
+                  let x1 = l.x + NODE_W / 2, x2 = r.x - NODE_W / 2;
+                  if (x2 <= x1) { x1 = l.x; x2 = r.x; }
+                  const y = (a.y + b.y) / 2;
+                  out.push(<line key={e.id + "s1"} x1={x1} y1={y - 3} x2={x2} y2={y - 3} stroke="#c98aa0" strokeWidth={1.5} />);
+                  out.push(<line key={e.id + "s2"} x1={x1} y1={y + 3} x2={x2} y2={y + 3} stroke="#c98aa0" strokeWidth={1.5} />);
+                });
                 Object.keys(kids).forEach(pid => {
                   const par = byId[pid]; if (!par) return;
                   const cs = kids[pid].map(id => byId[id]).filter(Boolean);
@@ -519,9 +651,11 @@ function FamilyTree() {
             </svg>
 
             {/* nodes */}
-            {people.map(p => {
+            {visPeople.map(p => {
               const isSel = p.id === selectedId;
               const isLinkFrom = linkFrom === p.id;
+              const isF = p.gender === "f";
+              const accent = isF ? "#b06a84" : C.goldSoft;
               return (
                 <div key={p.id}
                   onPointerDown={(e) => onNodePointerDown(e, p.id)}
@@ -529,16 +663,16 @@ function FamilyTree() {
                   style={{
                     position: "absolute", left: p.x, top: p.y,
                     width: NODE_W, height: NODE_H, marginLeft: -NODE_W / 2, marginTop: -NODE_H / 2,
-                    background: "linear-gradient(180deg,#ffffff,#f5f2ea)",
+                    background: isF ? "linear-gradient(180deg,#ffffff,#f7eef2)" : "linear-gradient(180deg,#ffffff,#f5f2ea)",
                     borderRadius: 12, padding: 10, boxSizing: "border-box",
-                    border: `2px solid ${isLinkFrom ? "#e0a23a" : isSel ? C.gold : "#ddd7c9"}`,
+                    border: `2px solid ${isLinkFrom ? "#e0a23a" : isSel ? C.gold : isF ? "#e0c4cf" : "#ddd7c9"}`,
                     boxShadow: isSel ? `0 0 0 4px rgba(47,125,98,.22), 0 8px 22px rgba(0,0,0,.16)` : "0 3px 10px rgba(0,0,0,.10)",
                     display: "flex", flexDirection: "column", alignItems: "center",
                     cursor: "pointer", userSelect: "none",
                   }}>
                   <div style={{
                     width: 74, height: 74, borderRadius: "50%", overflow: "hidden",
-                    border: `2px solid ${C.goldSoft}`, background: "#e9e4d8",
+                    border: `2px solid ${accent}`, background: "#e9e4d8",
                     display: "grid", placeItems: "center", flexShrink: 0,
                   }}>
                     {photos[p.id]
@@ -552,12 +686,18 @@ function FamilyTree() {
                     marginTop: 6, textAlign: "center", lineHeight: 1.2, maxWidth: "100%",
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>{p.name}</div>
-                  {p.deceased && (
-                    <div style={{ fontSize: 11, color: "#7a6a47", fontFamily: "'Amiri',serif" }}>
-                      رحمه الله
+                  {p.nickname && (
+                    <div style={{ fontSize: 10, color: "#8a7d6a", textAlign: "center", maxWidth: "100%",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.nickname}
                     </div>
                   )}
-                  {p.note && !p.deceased && (
+                  {p.deceased && (
+                    <div style={{ fontSize: 11, color: "#7a6a47", fontFamily: "'Amiri',serif" }}>
+                      {mercy(p)}
+                    </div>
+                  )}
+                  {p.note && !p.deceased && !p.nickname && (
                     <div style={{ fontSize: 10, color: "#6b5d40", marginTop: 2, textAlign: "center",
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
                       {p.note}
@@ -617,7 +757,7 @@ function FamilyTree() {
                 {searchHits.slice(0, 30).map(p => (
                   <div key={p.id} onClick={() => focusPerson(p)} style={{
                     padding: "8px 12px", cursor: "pointer", fontSize: 14, borderBottom: `1px solid ${C.border}`,
-                  }}>{p.name}{p.deceased ? " · رحمه الله" : ""}</div>
+                  }}>{p.name}{p.nickname ? ` (${p.nickname})` : ""}{p.deceased ? ` · ${mercy(p)}` : ""}</div>
                 ))}
               </div>
             )}
@@ -631,7 +771,7 @@ function FamilyTree() {
             display: "flex", flexDirection: "column", zIndex: 20,
           }}>
             <div style={{ display: "flex", borderBottom: `1px solid ${C.border}` }}>
-              {[["edit", "تحرير"], ["log", `السجل (${log.length})`]].map(([k, lbl]) => (
+              {[["view", "الملف"], ["edit", "تحرير"], ["log", `السجل (${log.length})`]].map(([k, lbl]) => (
                 <button key={k} onClick={() => setTab(k)} style={{
                   flex: 1, padding: "12px 0", background: tab === k ? C.panel2 : "transparent",
                   color: tab === k ? C.gold : C.sub, border: "none", borderBottom: tab === k ? `2px solid ${C.gold}` : "2px solid transparent",
@@ -641,34 +781,51 @@ function FamilyTree() {
             </div>
 
             <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+              {tab === "view" && (
+                selected ? (
+                  <ProfilePanel C={C} person={selected} photo={photos[selected.id]}
+                    people={visPeople} pmap={pmap} edges={visEdges} familyMode={familyMode}
+                    onEdit={() => setTab("edit")}
+                    onUnlock={() => setShowUnlock(true)}
+                    onSelect={(id) => setSelectedId(id)}
+                    onRadial={() => setRadialRoot(selected.id)}
+                  />
+                ) : (
+                  <PanelHint C={C} />
+                )
+              )}
               {tab === "edit" && (
                 selected ? (
                   <EditPanel C={C} person={selected} photo={photos[selected.id]}
-                    people={people} edges={edges}
+                    people={visPeople} edges={visEdges} familyMode={familyMode}
                     onName={(v) => updatePerson(selected.id, { name: v })}
                     onNameCommit={(v) => addLog(`تعديل الاسم إلى: ${v}`)}
+                    onNickname={(v) => updatePerson(selected.id, { nickname: v })}
+                    onGender={(v) => updatePerson(selected.id, { gender: v },
+                      `تعديل الجنس (${selected.name}): ${v === "f" ? "أنثى" : "ذكر"}`)}
+                    onDob={(v) => updatePerson(selected.id, { dob: v })}
+                    onDod={(v) => updatePerson(selected.id, { dod: v })}
+                    onElderly={(v) => updatePerson(selected.id, { elderly: v })}
+                    onContact={(field, v) => updatePerson(selected.id,
+                      { contacts: { ...(selected.contacts || {}), [field]: v } })}
+                    onPoc={(id) => updatePerson(selected.id, { poc: id },
+                      id ? `تعيين جهة تواصل لـ ${selected.name}` : `إزالة جهة التواصل لـ ${selected.name}`)}
                     onNote={(v) => updatePerson(selected.id, { note: v })}
                     onDeceased={(v) => updatePerson(selected.id, { deceased: v },
                       v ? `تعليم متوفى: ${selected.name}` : `إلغاء تعليم المتوفى: ${selected.name}`)}
                     onUpload={() => fileRef.current?.click()}
                     onRemovePhoto={() => removePhoto(selected.id)}
-                    onAddChild={() => addChild(selected.id)}
-                    onAddParent={() => addParent(selected.id)}
+                    onAddChild={(g) => addChild(selected.id, g)}
+                    onAddParent={(g) => addParent(selected.id, g)}
+                    onAddSpouse={() => addSpouse(selected.id)}
                     onDelete={() => deletePerson(selected.id)}
                     onRemoveEdge={removeEdge}
                     onRadial={() => setRadialRoot(selected.id)}
                     onSelect={(id) => { setSelectedId(id); }}
+                    onUnlock={() => setShowUnlock(true)}
                   />
                 ) : (
-                  <div style={{ color: C.sub, fontSize: 14, lineHeight: 1.9, textAlign: "center", marginTop: 30 }}>
-                    اختر شخصًا من الشجرة لتحريره،<br />أو اضغط "+ شخص" لإضافة فرد جديد.
-                    <div style={{ marginTop: 20, fontSize: 12, color: C.line, textAlign: "right", lineHeight: 2 }}>
-                      · اسحب الخلفية للتنقل<br />
-                      · اسحب أي بطاقة لتحريكها<br />
-                      · عجلة الفأرة للتكبير<br />
-                      · "ربط شخصين" لرسم خط بينهما
-                    </div>
-                  </div>
+                  <PanelHint C={C} />
                 )
               )}
               {tab === "log" && (
@@ -694,14 +851,16 @@ function FamilyTree() {
         onChange={e => { if (selected) handlePhoto(selected.id, e.target.files[0]); e.target.value = ""; }} />
 
       {radialRoot && (() => {
-        const kids = {}; edges.forEach(e => { (kids[e.from] = kids[e.from] || []).push(e.to); });
+        const kids = {};
+        visEdges.filter(e => e.type !== "spouse")
+          .forEach(e => { (kids[e.from] = kids[e.from] || []).push(e.to); });
         const W = 920, H = 920, ccx = W/2, ccy = H/2, RING = 150;
         const ns = [], ls = [];
         const lay = (id, depth, a0, a1, par) => {
           const ang = (a0 + a1) / 2, r = depth * RING;
           const x = ccx + r * Math.cos(ang), y = ccy + r * Math.sin(ang);
           const pp = pmap[id]; if (!pp) return;
-          const pos = { id, x, y, depth, name: pp.name, dead: pp.deceased };
+          const pos = { id, x, y, depth, name: pp.name, dead: pp.deceased, f: pp.gender === "f" };
           ns.push(pos); if (par) ls.push({ a: par, b: pos });
           const ks = (kids[id] || []).slice(0, 12);
           if (ks.length && depth < 3) {
@@ -738,7 +897,7 @@ function FamilyTree() {
                         : <circle cx={n.x} cy={n.y} r={rr} fill="#e9e4d8"/>}
                       <text x={n.x} y={n.y+rr+14} textAnchor="middle" fontSize={n.depth===0?15:12}
                         fontFamily="serif" fontWeight="700" fill={C.parch}>{n.name}</text>
-                      {n.dead && <text x={n.x} y={n.y+rr+27} textAnchor="middle" fontSize="10" fill={C.sub}>رحمه الله</text>}
+                      {n.dead && <text x={n.x} y={n.y+rr+27} textAnchor="middle" fontSize="10" fill={C.sub}>{n.f ? "رحمها الله" : "رحمه الله"}</text>}
                     </g>
                   );
                 })}
@@ -750,6 +909,8 @@ function FamilyTree() {
           </div>
         );
       })()}
+
+      {showUnlock && <UnlockModal C={C} onTry={tryUnlock} onClose={() => setShowUnlock(false)} />}
 
       {loading && (
         <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: C.bg, zIndex: 50 }}>
@@ -779,23 +940,279 @@ function RoundBtn({ children, onClick, C, title }) {
   );
 }
 
-function EditPanel({ C, person, photo, people, edges, onRadial, onName, onNameCommit, onNote, onDeceased,
-  onUpload, onRemovePhoto, onAddChild, onAddParent, onDelete, onRemoveEdge, onSelect }) {
+function PanelHint({ C }) {
+  return (
+    <div style={{ color: C.sub, fontSize: 14, lineHeight: 1.9, textAlign: "center", marginTop: 30 }}>
+      اختر شخصًا من الشجرة لعرض ملفه أو تحريره،<br />أو اضغط "+ شخص" لإضافة فرد جديد.
+      <div style={{ marginTop: 20, fontSize: 12, color: C.line, textAlign: "right", lineHeight: 2 }}>
+        · اسحب الخلفية للتنقل<br />
+        · عجلة الفأرة أو إصبعان للتكبير<br />
+        · "ربط شخصين" لرسم خط بينهما<br />
+        · "🔒 الوضع العائلي" لعرض بيانات التواصل والمواليد
+      </div>
+    </div>
+  );
+}
+
+function LockedHint({ C, onUnlock, text }) {
+  return (
+    <div style={{
+      background: C.panel2, border: `1px dashed ${C.border}`, borderRadius: 8,
+      padding: "10px 12px", fontSize: 12.5, color: C.sub, marginBottom: 14, lineHeight: 1.8,
+    }}>
+      🔒 {text}
+      <div>
+        <span onClick={onUnlock} style={{ color: C.gold, cursor: "pointer", fontWeight: 700, textDecoration: "underline" }}>
+          إدخال رمز العائلة
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ContactLinks({ C, person }) {
+  const c = person.contacts || {};
+  const links = [
+    ["واتساب", waLink(c.whatsapp), "#25D366"],
+    ["لينكدإن", liLink(c.linkedin), "#0A66C2"],
+    ["إكس / تويتر", twLink(c.twitter), "#333333"],
+  ].filter(([, url]) => url);
+  if (!links.length) return <div style={{ fontSize: 13, color: C.sub }}>لا توجد بيانات تواصل مسجلة.</div>;
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {links.map(([lbl, url, col]) => (
+        <a key={lbl} href={url} target="_blank" rel="noopener noreferrer" style={{
+          background: col, color: "#fff", padding: "7px 14px", borderRadius: 7,
+          fontSize: 13, fontWeight: 600, textDecoration: "none", fontFamily: "'Tajawal'",
+        }}>{lbl}</a>
+      ))}
+    </div>
+  );
+}
+
+function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdit, onUnlock, onSelect, onRadial }) {
+  const sect = { fontSize: 13, color: C.gold, margin: "16px 0 8px", fontWeight: 700 };
+
+  // paternal lineage chain: فلان بن فلان بن فلان…
+  const chain = [];
+  let cur = person.id;
+  for (let i = 0; i < 12; i++) {
+    const ps = edges.filter(e => e.type !== "spouse" && e.to === cur).map(e => pmap[e.from]).filter(Boolean);
+    const father = ps.find(p => p.gender !== "f") || ps[0];
+    if (!father) break;
+    chain.push(father);
+    cur = father.id;
+  }
+  const bin = person.gender === "f" ? "بنت" : "بن";
+  const age = ageOf(person);
+  const spouses = edges.filter(e => e.type === "spouse" && (e.from === person.id || e.to === person.id))
+    .map(e => pmap[e.from === person.id ? e.to : e.from]).filter(Boolean);
+  const kids = edges.filter(e => e.type !== "spouse" && e.from === person.id).map(e => pmap[e.to]).filter(Boolean);
+  const poc = person.poc ? pmap[person.poc] : null;
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 6 }}>
+        <div style={{
+          width: 96, height: 96, borderRadius: "50%", overflow: "hidden",
+          border: `3px solid ${person.gender === "f" ? "#b06a84" : C.gold}`,
+          background: "#d8c9a8", display: "grid", placeItems: "center", marginBottom: 10,
+        }}>
+          {photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            : <span style={{ fontFamily: "'Amiri',serif", fontSize: 40, color: "#8a754a" }}>{person.name?.[0] || "؟"}</span>}
+        </div>
+        <div style={{ fontFamily: "'Amiri',serif", fontSize: 22, fontWeight: 700, color: "#2c2415", textAlign: "center" }}>
+          {person.name}
+        </div>
+        {person.nickname && <div style={{ fontSize: 13, color: C.sub }}>{person.nickname}</div>}
+        {person.deceased && <div style={{ fontSize: 13, color: "#7a6a47", fontFamily: "'Amiri',serif" }}>{mercy(person)}</div>}
+        {person.elderly && !person.deceased && (
+          <div style={{ fontSize: 12, color: "#8a6d3b", background: "#f7efdc", padding: "2px 10px", borderRadius: 10, marginTop: 4 }}>
+            كبير السن — أطال الله عمره
+          </div>
+        )}
+      </div>
+
+      {chain.length > 0 && (
+        <div style={{ fontSize: 13, color: C.sub, textAlign: "center", lineHeight: 1.9, marginBottom: 4 }}>
+          {person.name} {bin} {chain.map(a => a.name).join(" بن ")}
+        </div>
+      )}
+
+      <div style={sect}>الميلاد والعمر</div>
+      {familyMode ? (
+        <div style={{ fontSize: 14, lineHeight: 1.9 }}>
+          {person.dob
+            ? <>تاريخ الميلاد: {person.dob}{age != null && !person.deceased ? ` · العمر ${age} سنة تقريبًا` : ""}</>
+            : <span style={{ color: C.sub, fontSize: 13 }}>لم يُسجل تاريخ الميلاد.</span>}
+          {person.deceased && person.dod && <div>سنة الوفاة: {person.dod}{age != null ? ` · عن عمر ${age} سنة تقريبًا` : ""}</div>}
+        </div>
+      ) : (
+        <LockedHint C={C} onUnlock={onUnlock} text="تواريخ الميلاد تظهر في الوضع العائلي فقط." />
+      )}
+
+      <div style={sect}>التواصل</div>
+      {familyMode ? (
+        person.deceased || person.elderly ? (
+          poc ? (
+            <div style={{ fontSize: 14, lineHeight: 2 }}>
+              جهة التواصل: <span onClick={() => onSelect(poc.id)}
+                style={{ color: C.gold, cursor: "pointer", fontWeight: 700, textDecoration: "underline" }}>{poc.name}</span>
+              <div style={{ marginTop: 6 }}><ContactLinks C={C} person={poc} /></div>
+            </div>
+          ) : <div style={{ fontSize: 13, color: C.sub }}>لم تُحدد جهة تواصل بعد.</div>
+        ) : <ContactLinks C={C} person={person} />
+      ) : (
+        <LockedHint C={C} onUnlock={onUnlock} text="بيانات التواصل تظهر في الوضع العائلي فقط." />
+      )}
+
+      {(spouses.length > 0 || kids.length > 0) && (
+        <div>
+          <div style={sect}>الأسرة</div>
+          <div style={{ fontSize: 13.5, lineHeight: 2 }}>
+            {spouses.map(s => (
+              <div key={s.id}>{s.gender === "f" ? "الزوجة" : "الزوج"}: <span onClick={() => onSelect(s.id)}
+                style={{ color: C.gold, cursor: "pointer" }}>{s.name}</span></div>
+            ))}
+            {kids.length > 0 && (
+              <div>الأبناء ({kids.length}): {kids.map((k, i) => (
+                <span key={k.id}>
+                  <span onClick={() => onSelect(k.id)} style={{ color: C.gold, cursor: "pointer" }}>{k.name}</span>
+                  {i < kids.length - 1 ? "، " : ""}
+                </span>
+              ))}</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+        <button onClick={onEdit} style={{
+          flex: 1, padding: "10px", borderRadius: 7, border: "none",
+          background: C.gold, color: "#fff", cursor: "pointer", fontFamily: "'Tajawal'",
+          fontSize: 14, fontWeight: 600,
+        }}>تحرير البيانات</button>
+        <Btn C={C} onClick={onRadial}>عرض دائري</Btn>
+      </div>
+    </div>
+  );
+}
+
+function PocPicker({ C, people, value, onChange }) {
+  const [q, setQ] = useState("");
+  const chosen = value ? people.find(p => p.id === value) : null;
+  const nq = normAr(q);
+  const hits = nq ? people.filter(p => !p.deceased && (normAr(p.name).includes(nq) || normAr(p.nickname).includes(nq))).slice(0, 8) : [];
+  return (
+    <div style={{ marginBottom: 14 }}>
+      {chosen ? (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "8px 11px", background: C.panel2, borderRadius: 7, fontSize: 14,
+        }}>
+          <span>{chosen.name}{chosen.nickname ? ` (${chosen.nickname})` : ""}</span>
+          <button onClick={() => onChange(null)} style={{
+            background: "transparent", border: "none", color: "#c0392b", cursor: "pointer", fontSize: 12,
+          }}>إزالة</button>
+        </div>
+      ) : (
+        <div>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="ابحث عن اسم جهة التواصل…"
+            style={{
+              width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 7,
+              border: `1px solid ${C.border}`, background: C.panel2, color: C.parch,
+              fontFamily: "'Tajawal'", fontSize: 14, outline: "none",
+            }} />
+          {hits.length > 0 && (
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 4, maxHeight: 180, overflowY: "auto" }}>
+              {hits.map(p => (
+                <div key={p.id} onClick={() => { onChange(p.id); setQ(""); }}
+                  style={{ padding: "7px 11px", fontSize: 13.5, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                  {p.name}{p.nickname ? ` (${p.nickname})` : ""}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UnlockModal({ C, onTry, onClose }) {
+  const [code, setCode] = useState("");
+  const [err, setErr] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!code || busy) return;
+    setBusy(true);
+    const ok = await onTry(code);
+    setBusy(false);
+    if (!ok) { setErr(true); setCode(""); }
+  };
+  return (
+    <div style={{
+      position: "absolute", inset: 0, background: "rgba(43,42,37,.45)", zIndex: 80,
+      display: "grid", placeItems: "center",
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "#fff", borderRadius: 12, padding: 24, width: 320, maxWidth: "88vw",
+        boxShadow: "0 18px 50px rgba(0,0,0,.25)", textAlign: "center",
+      }}>
+        <div style={{ fontFamily: "'Amiri',serif", fontSize: 20, fontWeight: 700, color: C.gold, marginBottom: 6 }}>
+          الوضع العائلي
+        </div>
+        <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.9, marginBottom: 14 }}>
+          أدخل رمز العائلة لعرض بيانات التواصل وتواريخ الميلاد وأفراد العائلة من النساء.
+        </div>
+        <input type="password" value={code} autoFocus
+          onChange={e => { setCode(e.target.value); setErr(false); }}
+          onKeyDown={e => { if (e.key === "Enter") submit(); }}
+          placeholder="رمز العائلة"
+          style={{
+            width: "100%", boxSizing: "border-box", padding: "10px 12px", borderRadius: 8,
+            border: `1px solid ${err ? "#c0392b" : C.border}`, background: C.panel2,
+            fontFamily: "'Tajawal'", fontSize: 15, outline: "none", textAlign: "center", marginBottom: 8,
+          }} />
+        {err && <div style={{ fontSize: 12.5, color: "#c0392b", marginBottom: 8 }}>رمز غير صحيح، حاول مرة أخرى.</div>}
+        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+          <button onClick={submit} disabled={busy} style={{
+            flex: 1, padding: "10px", borderRadius: 8, border: "none", background: C.gold,
+            color: "#fff", cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14, fontWeight: 700,
+          }}>{busy ? "جارٍ التحقق…" : "دخول"}</button>
+          <button onClick={onClose} style={{
+            padding: "10px 16px", borderRadius: 8, border: `1px solid ${C.border}`, background: "transparent",
+            color: C.sub, cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14,
+          }}>إلغاء</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onName, onNameCommit,
+  onNickname, onGender, onDob, onDod, onElderly, onContact, onPoc, onNote, onDeceased,
+  onUpload, onRemovePhoto, onAddChild, onAddParent, onAddSpouse, onDelete, onRemoveEdge, onSelect, onUnlock }) {
   const label = { fontSize: 12, color: C.sub, marginBottom: 5, display: "block" };
   const inp = {
     width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 7,
     border: `1px solid ${C.border}`, background: C.panel2, color: C.parch,
     fontFamily: "'Tajawal'", fontSize: 14, outline: "none", marginBottom: 14,
   };
-  const parents = edges.filter(e => e.to === person.id);
-  const children = edges.filter(e => e.from === person.id);
-  const nameOf = (id) => people.find(p => p.id === id)?.name || "؟";
+  const sect = { fontSize: 13, color: C.gold, margin: "4px 0 10px", fontWeight: 700 };
+  const parents = edges.filter(e => e.type !== "spouse" && e.to === person.id);
+  const children = edges.filter(e => e.type !== "spouse" && e.from === person.id);
+  const spouses = edges.filter(e => e.type === "spouse" && (e.from === person.id || e.to === person.id));
+  const personOf = (id) => people.find(p => p.id === id);
+  const nameOf = (id) => personOf(id)?.name || "؟";
+  const contacts = person.contacts || {};
 
   return (
     <div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 16 }}>
         <div style={{
-          width: 96, height: 96, borderRadius: "50%", overflow: "hidden", border: `3px solid ${C.gold}`,
+          width: 96, height: 96, borderRadius: "50%", overflow: "hidden",
+          border: `3px solid ${person.gender === "f" ? "#b06a84" : C.gold}`,
           background: "#d8c9a8", display: "grid", placeItems: "center", marginBottom: 10,
         }}>
           {photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -811,18 +1228,64 @@ function EditPanel({ C, person, photo, people, edges, onRadial, onName, onNameCo
       <input value={person.name} onChange={e => onName(e.target.value)}
         onBlur={e => onNameCommit(e.target.value)} style={inp} />
 
-      <label style={label}>ملاحظة (سنة الميلاد، الفرع…)</label>
-      <input value={person.note} onChange={e => onNote(e.target.value)} style={inp} />
+      <label style={label}>الكنية / اللقب (أبو فلان…)</label>
+      <input value={person.nickname || ""} onChange={e => onNickname(e.target.value)} style={inp} />
 
-      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 14 }}>
+      <label style={label}>الجنس</label>
+      <select value={person.gender || "m"} onChange={e => onGender(e.target.value)}
+        style={{ ...inp, appearance: "auto" }}>
+        <option value="m">ذكر</option>
+        <option value="f">أنثى</option>
+      </select>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, cursor: "pointer", fontSize: 14 }}>
         <input type="checkbox" checked={!!person.deceased} onChange={e => onDeceased(e.target.checked)}
           style={{ width: 17, height: 17, accentColor: C.gold }} />
-        متوفى (رحمه الله)
+        متوفى ({mercy(person)})
+      </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 14 }}>
+        <input type="checkbox" checked={!!person.elderly} onChange={e => onElderly(e.target.checked)}
+          style={{ width: 17, height: 17, accentColor: C.gold }} />
+        كبير السن (يُتواصل معه عبر جهة تواصل)
       </label>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        <Btn C={C} onClick={onAddParent}>+ والد</Btn>
-        <Btn C={C} onClick={onAddChild}>+ ابن / ابنة</Btn>
+      {familyMode ? (
+        <div>
+          <div style={sect}>الميلاد والوفاة</div>
+          <label style={label}>تاريخ الميلاد (سنة فقط أو تاريخ كامل: 1965 أو 1965-04-12)</label>
+          <input value={person.dob || ""} onChange={e => onDob(e.target.value)} style={inp} dir="ltr" />
+          {person.deceased && (
+            <div>
+              <label style={label}>سنة الوفاة</label>
+              <input value={person.dod || ""} onChange={e => onDod(e.target.value)} style={inp} dir="ltr" />
+            </div>
+          )}
+
+          <div style={sect}>بيانات التواصل</div>
+          <label style={label}>واتساب (رقم دولي مثل +9665xxxxxxxx)</label>
+          <input value={contacts.whatsapp || ""} onChange={e => onContact("whatsapp", e.target.value)} style={inp} dir="ltr" />
+          <label style={label}>لينكدإن (رابط أو اسم مستخدم)</label>
+          <input value={contacts.linkedin || ""} onChange={e => onContact("linkedin", e.target.value)} style={inp} dir="ltr" />
+          <label style={label}>إكس / تويتر (اسم المستخدم)</label>
+          <input value={contacts.twitter || ""} onChange={e => onContact("twitter", e.target.value)} style={inp} dir="ltr" />
+
+          <div style={sect}>جهة التواصل (للمتوفى أو كبير السن)</div>
+          <PocPicker C={C} people={people} value={person.poc} onChange={onPoc} />
+        </div>
+      ) : (
+        <LockedHint C={C} onUnlock={onUnlock}
+          text="تحرير تواريخ الميلاد وبيانات التواصل متاح في الوضع العائلي فقط." />
+      )}
+
+      <label style={label}>ملاحظة (الفرع، معلومات إضافية…)</label>
+      <input value={person.note} onChange={e => onNote(e.target.value)} style={inp} />
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+        <Btn C={C} onClick={() => onAddParent("m")}>+ والد</Btn>
+        <Btn C={C} onClick={() => onAddParent("f")}>+ والدة</Btn>
+        <Btn C={C} onClick={() => onAddChild("m")}>+ ابن</Btn>
+        <Btn C={C} onClick={() => onAddChild("f")}>+ بنت</Btn>
+        <Btn C={C} onClick={onAddSpouse}>+ {person.gender === "f" ? "زوج" : "زوجة"}</Btn>
       </div>
       <button onClick={onRadial} style={{
         width: "100%", padding: "10px", borderRadius: 7, border: "none",
@@ -830,15 +1293,20 @@ function EditPanel({ C, person, photo, people, edges, onRadial, onName, onNameCo
         fontSize: 14, fontWeight: 600, marginBottom: 16,
       }}>عرض الفرع دائريًا</button>
 
-      {(parents.length > 0 || children.length > 0) && (
+      {(parents.length > 0 || children.length > 0 || spouses.length > 0) && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 13, color: C.gold, marginBottom: 8, fontWeight: 700 }}>الروابط</div>
           {parents.map(e => (
-            <EdgeRow key={e.id} C={C} kind="والد" name={nameOf(e.from)}
+            <EdgeRow key={e.id} C={C} kind={personOf(e.from)?.gender === "f" ? "والدة" : "والد"} name={nameOf(e.from)}
               onGo={() => onSelect(e.from)} onDel={() => onRemoveEdge(e.id)} />
           ))}
+          {spouses.map(e => {
+            const other = e.from === person.id ? e.to : e.from;
+            return <EdgeRow key={e.id} C={C} kind={personOf(other)?.gender === "f" ? "زوجة" : "زوج"} name={nameOf(other)}
+              onGo={() => onSelect(other)} onDel={() => onRemoveEdge(e.id)} />;
+          })}
           {children.map(e => (
-            <EdgeRow key={e.id} C={C} kind="ابن" name={nameOf(e.to)}
+            <EdgeRow key={e.id} C={C} kind={personOf(e.to)?.gender === "f" ? "ابنة" : "ابن"} name={nameOf(e.to)}
               onGo={() => onSelect(e.to)} onDel={() => onRemoveEdge(e.id)} />
           ))}
         </div>
