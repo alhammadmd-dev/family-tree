@@ -4,8 +4,14 @@ Interactive Arabic family tree (927 people, 9 generations) rebuilt from the orig
 
 ## Files
 - `index.html` — the app (React via CDN, runs in any browser)
-- `family-tree-data.json` — the tree data (names, links, photos)
+- `family-tree-data.json` — the tree data (names, links, fields) — small, loads first
+- `family-tree-photos.json` — the photo pack (base64 images), fetched lazily after the tree renders
 - `.nojekyll` — tells GitHub Pages to serve files as-is
+
+## Navigation
+- **Minimap** (bottom-right): shows the whole tree with the current viewport; click or drag to jump anywhere.
+- **Deep links**: every person has a shareable URL (`…/#p=<id>`) — use the "نسخ رابط" button in their profile. Opening the link focuses the tree on that person. Links to female members only resolve in family mode.
+- On phones the panel opens as a bottom sheet; swipe-handle tap closes it.
 
 ## Publish on GitHub Pages
 1. Create a new repository on GitHub (e.g. `family-tree`), Public.
