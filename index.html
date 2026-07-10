@@ -81,9 +81,44 @@ function ageOf(p) {
 }
 const mercy = (p) => p.gender === "f" ? "رحمها الله" : "رحمه الله";
 
+const AR_MONTHS = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+const fmtDate = (v) => {
+  const m = String(v || "").match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?/);
+  if (!m) return v || "";
+  return (m[3] ? +m[3] + " " : "") + (m[2] ? AR_MONTHS[+m[2] - 1] + " " : "") + m[1];
+};
+
 const waLink = (v) => { const d = String(v || "").replace(/\D/g, ""); return d ? `https://wa.me/${d}` : null; };
 const liLink = (v) => { v = String(v || "").trim(); return !v ? null : (/^https?:/.test(v) ? v : `https://www.linkedin.com/in/${encodeURIComponent(v)}`); };
 const twLink = (v) => { v = String(v || "").trim().replace(/^@/, ""); return !v ? null : (/^https?:/.test(v) ? v : `https://x.com/${v}`); };
+const mailLink = (v) => { v = String(v || "").trim(); return v && v.includes("@") ? `mailto:${v}` : null; };
+
+// per-field input restriction (strips disallowed characters as the user types)
+const fieldFilters = {
+  whatsapp: (v) => v.replace(/[^\d+ ]/g, ""),
+  email: (v) => v.replace(/\s/g, ""),
+  linkedin: (v) => v.replace(/\s/g, ""),
+  twitter: (v) => v.replace(/\s/g, ""),
+};
+// per-field validation (empty = valid; returns an Arabic error message otherwise)
+const fieldValidators = {
+  whatsapp: (v) => {
+    if (!v) return "";
+    const d = v.replace(/\D/g, "");
+    return d.length >= 8 && d.length <= 15 ? "" : "أدخل رقمًا دوليًا صحيحًا (٨ إلى ١٥ رقمًا، مثل ‎+9665xxxxxxxx)";
+  },
+  email: (v) => !v || /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v) ? "" : "بريد إلكتروني غير صحيح",
+  linkedin: (v) => {
+    if (!v) return "";
+    if (/^https?:\/\//.test(v)) return /linkedin\.com\//.test(v) ? "" : "الرابط يجب أن يكون من linkedin.com";
+    return /^[A-Za-z0-9\-_.]{3,100}$/.test(v) ? "" : "أدخل اسم مستخدم صحيحًا أو رابط linkedin.com كاملًا";
+  },
+  twitter: (v) => {
+    if (!v) return "";
+    if (/^https?:\/\//.test(v)) return /(x\.com|twitter\.com)\//.test(v) ? "" : "الرابط يجب أن يكون من x.com";
+    return /^@?[A-Za-z0-9_]{1,15}$/.test(v) ? "" : "اسم مستخدم غير صحيح (أحرف إنجليزية وأرقام و _ فقط)";
+  },
+};
 
 // ====== Seed data (from transcription) ======
 
@@ -1059,6 +1094,7 @@ function ContactLinks({ C, person }) {
   const c = person.contacts || {};
   const links = [
     ["واتساب", waLink(c.whatsapp), "#25D366"],
+    ["البريد", mailLink(c.email), "#8a6d3b"],
     ["لينكدإن", liLink(c.linkedin), "#0A66C2"],
     ["إكس / تويتر", twLink(c.twitter), "#333333"],
   ].filter(([, url]) => url);
@@ -1128,9 +1164,9 @@ function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdi
       {familyMode ? (
         <div style={{ fontSize: 14, lineHeight: 1.9 }}>
           {person.dob
-            ? <>تاريخ الميلاد: {person.dob}{age != null && !person.deceased ? ` · العمر ${age} سنة تقريبًا` : ""}</>
+            ? <>تاريخ الميلاد: {fmtDate(person.dob)}{age != null && !person.deceased ? ` · العمر ${age} سنة تقريبًا` : ""}</>
             : <span style={{ color: C.sub, fontSize: 13 }}>لم يُسجل تاريخ الميلاد.</span>}
-          {person.deceased && person.dod && <div>سنة الوفاة: {person.dod}{age != null ? ` · عن عمر ${age} سنة تقريبًا` : ""}</div>}
+          {person.deceased && person.dod && <div>سنة الوفاة: {yearOf(person.dod)}{age != null ? ` · عن عمر ${age} سنة تقريبًا` : ""}</div>}
         </div>
       ) : (
         <LockedHint C={C} onUnlock={onUnlock} text="تواريخ الميلاد تظهر في الوضع العائلي فقط." />
@@ -1338,6 +1374,70 @@ function UnlockModal({ C, onTry, onClose }) {
   );
 }
 
+// dropdown date picker; stores "YYYY", "YYYY-MM" or "YYYY-MM-DD" (month/day optional)
+function DateSelect({ C, value, onChange, yearOnly }) {
+  const m = String(value || "").match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?/);
+  const y = m ? +m[1] : "", mo = m && m[2] ? +m[2] : "", d = m && m[3] ? +m[3] : "";
+  const nowY = new Date().getFullYear();
+  const years = []; for (let i = nowY; i >= 1850; i--) years.push(i);
+  const daysIn = (yy, mm) => new Date(yy || 2000, mm, 0).getDate();
+  const emit = (ny, nm, nd) => {
+    if (!ny) return onChange("");
+    let s = String(ny);
+    if (nm) { s += "-" + String(nm).padStart(2, "0"); if (nd) s += "-" + String(nd).padStart(2, "0"); }
+    onChange(s);
+  };
+  const sel = {
+    flex: 1, minWidth: 0, padding: "8px 6px", borderRadius: 7, border: `1px solid ${C.border}`,
+    background: C.panel2, color: C.parch, fontFamily: "'Tajawal'", fontSize: 13.5, outline: "none",
+  };
+  return (
+    <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+      <select value={y} style={sel} onChange={e => {
+        const ny = +e.target.value || "";
+        emit(ny, ny ? mo : "", ny && mo ? Math.min(d || 0, daysIn(ny, mo)) || "" : "");
+      }}>
+        <option value="">السنة</option>
+        {years.map(yy => <option key={yy} value={yy}>{yy}</option>)}
+      </select>
+      {!yearOnly && (
+        <select value={mo} style={sel} disabled={!y} onChange={e => {
+          const nm = +e.target.value || "";
+          emit(y, nm, nm ? Math.min(d || 0, daysIn(y, nm)) || "" : "");
+        }}>
+          <option value="">الشهر</option>
+          {AR_MONTHS.map((nm, i) => <option key={i} value={i + 1}>{nm}</option>)}
+        </select>
+      )}
+      {!yearOnly && (
+        <select value={d} style={{ ...sel, maxWidth: 76 }} disabled={!mo} onChange={e => emit(y, mo, +e.target.value || "")}>
+          <option value="">اليوم</option>
+          {mo ? Array.from({ length: daysIn(y, mo) }, (_, i) => i + 1).map(dd =>
+            <option key={dd} value={dd}>{dd}</option>) : null}
+        </select>
+      )}
+    </div>
+  );
+}
+
+// input restricted + validated per field type, with an inline error hint
+function VInput({ C, label, value, onChange, field, placeholder, inputMode }) {
+  const err = fieldValidators[field] ? fieldValidators[field](value || "") : "";
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ fontSize: 12, color: C.sub, marginBottom: 5, display: "block" }}>{label}</label>
+      <input value={value || ""} dir="ltr" inputMode={inputMode} placeholder={placeholder}
+        onChange={e => onChange(fieldFilters[field] ? fieldFilters[field](e.target.value) : e.target.value)}
+        style={{
+          width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 7,
+          border: `1px solid ${err ? "#c0392b" : C.border}`, background: C.panel2, color: C.parch,
+          fontFamily: "'Tajawal'", fontSize: 14, outline: "none",
+        }} />
+      {err && <div style={{ fontSize: 11.5, color: "#c0392b", marginTop: 4 }}>{err}</div>}
+    </div>
+  );
+}
+
 function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onName, onNameCommit,
   onNickname, onGender, onDob, onDod, onElderly, onContact, onPoc, onNote, onDeceased,
   onUpload, onRemovePhoto, onAddChild, onAddParent, onAddSpouse, onDelete, onRemoveEdge, onSelect, onUnlock }) {
@@ -1400,22 +1500,24 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
       {familyMode ? (
         <div>
           <div style={sect}>الميلاد والوفاة</div>
-          <label style={label}>تاريخ الميلاد (سنة فقط أو تاريخ كامل: 1965 أو 1965-04-12)</label>
-          <input value={person.dob || ""} onChange={e => onDob(e.target.value)} style={inp} dir="ltr" />
+          <label style={label}>تاريخ الميلاد (السنة تكفي، الشهر واليوم اختياريان)</label>
+          <DateSelect C={C} value={person.dob} onChange={onDob} />
           {person.deceased && (
             <div>
               <label style={label}>سنة الوفاة</label>
-              <input value={person.dod || ""} onChange={e => onDod(e.target.value)} style={inp} dir="ltr" />
+              <DateSelect C={C} value={person.dod} onChange={onDod} yearOnly />
             </div>
           )}
 
           <div style={sect}>بيانات التواصل</div>
-          <label style={label}>واتساب (رقم دولي مثل +9665xxxxxxxx)</label>
-          <input value={contacts.whatsapp || ""} onChange={e => onContact("whatsapp", e.target.value)} style={inp} dir="ltr" />
-          <label style={label}>لينكدإن (رابط أو اسم مستخدم)</label>
-          <input value={contacts.linkedin || ""} onChange={e => onContact("linkedin", e.target.value)} style={inp} dir="ltr" />
-          <label style={label}>إكس / تويتر (اسم المستخدم)</label>
-          <input value={contacts.twitter || ""} onChange={e => onContact("twitter", e.target.value)} style={inp} dir="ltr" />
+          <VInput C={C} field="whatsapp" inputMode="tel" label="واتساب (رقم دولي)"
+            placeholder="+9665xxxxxxxx" value={contacts.whatsapp} onChange={v => onContact("whatsapp", v)} />
+          <VInput C={C} field="email" inputMode="email" label="البريد الإلكتروني"
+            placeholder="name@example.com" value={contacts.email} onChange={v => onContact("email", v)} />
+          <VInput C={C} field="linkedin" label="لينكدإن (رابط أو اسم مستخدم)"
+            placeholder="linkedin.com/in/…" value={contacts.linkedin} onChange={v => onContact("linkedin", v)} />
+          <VInput C={C} field="twitter" label="إكس / تويتر (اسم المستخدم)"
+            placeholder="@username" value={contacts.twitter} onChange={v => onContact("twitter", v)} />
 
           <div style={sect}>جهة التواصل (للمتوفى أو كبير السن)</div>
           <PocPicker C={C} people={people} value={person.poc} onChange={onPoc} />
