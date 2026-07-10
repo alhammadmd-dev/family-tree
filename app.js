@@ -2051,7 +2051,44 @@ function FamilyTree() {
         photo: photos[id],
         selected: id === selectedId,
         onTap: pid => onNodeClick(pid)
-      }), kn > 0 && /*#__PURE__*/React.createElement("div", {
+      }), spousesOf(id).map((sp, i) => /*#__PURE__*/React.createElement("div", {
+        key: sp,
+        onClick: e => {
+          e.stopPropagation();
+          onNodeClick(sp);
+        },
+        title: pmap[sp]?.name || "",
+        style: {
+          position: "absolute",
+          left: q.x + 30,
+          top: q.y - 38 - i * 26,
+          width: 30,
+          height: 30,
+          borderRadius: "50%",
+          overflow: "hidden",
+          border: `2px ${pmap[sp]?.deceased ? "dashed" : "solid"} #b06a84`,
+          background: "#f4e9ee",
+          display: "grid",
+          placeItems: "center",
+          cursor: "pointer",
+          zIndex: 2,
+          boxShadow: "0 1px 4px rgba(0,0,0,.15)"
+        }
+      }, photos[sp] ? /*#__PURE__*/React.createElement("img", {
+        src: photos[sp],
+        alt: "",
+        style: {
+          width: "100%",
+          height: "100%",
+          objectFit: "cover"
+        }
+      }) : /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: "'Amiri',serif",
+          fontSize: 13,
+          color: "#8c5a70"
+        }
+      }, pmap[sp]?.name?.[0] || "؟"))), kn > 0 && /*#__PURE__*/React.createElement("div", {
         onClick: e => {
           e.stopPropagation();
           const ns = new Set(treeCollapsed);
@@ -2542,6 +2579,9 @@ function FamilyTree() {
     onNameCommit: v => addLog(`تعديل الاسم إلى: ${v}`),
     onNickname: v => updatePerson(selected.id, {
       nickname: v
+    }),
+    onBio: v => updatePerson(selected.id, {
+      bio: v
     }),
     onGender: v => updatePerson(selected.id, {
       gender: v
@@ -3187,7 +3227,16 @@ function ProfilePanel({
       lineHeight: 1.9,
       marginBottom: 4
     }
-  }, person.name, " ", bin, " ", chain.map(a => a.name).join(" بن ")), /*#__PURE__*/React.createElement("div", {
+  }, person.name, " ", bin, " ", chain.map(a => a.name).join(" بن ")), person.bio && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: sect
+  }, "نبذة"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      lineHeight: 2,
+      whiteSpace: "pre-line",
+      color: C.parch
+    }
+  }, person.bio)), /*#__PURE__*/React.createElement("div", {
     style: sect
   }, "الميلاد والعمر"), familyMode ? /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3845,6 +3894,7 @@ function EditPanel({
   onName,
   onNameCommit,
   onNickname,
+  onBio,
   onGender,
   onDob,
   onDod,
@@ -3953,6 +4003,19 @@ function EditPanel({
     style: inp
   }), /*#__PURE__*/React.createElement("label", {
     style: label
+  }, "نبذة مختصرة (سيرة، عمل، مواقف تُذكر…)"), /*#__PURE__*/React.createElement("textarea", {
+    value: person.bio || "",
+    onChange: e => onBio(e.target.value),
+    rows: 4,
+    style: {
+      ...inp,
+      resize: "vertical",
+      minHeight: 72,
+      fontFamily: "'Tajawal'",
+      lineHeight: 1.8
+    }
+  }), /*#__PURE__*/React.createElement("label", {
+    style: label
   }, "الجنس"), /*#__PURE__*/React.createElement("select", {
     value: person.gender || "m",
     onChange: e => onGender(e.target.value),
@@ -3963,7 +4026,8 @@ function EditPanel({
   }, /*#__PURE__*/React.createElement("option", {
     value: "m"
   }, "ذكر"), /*#__PURE__*/React.createElement("option", {
-    value: "f"
+    value: "f",
+    disabled: !familyMode && person.gender !== "f"
   }, "أنثى")), /*#__PURE__*/React.createElement("label", {
     style: {
       display: "flex",
@@ -4068,25 +4132,44 @@ function EditPanel({
     style: {
       display: "flex",
       gap: 6,
-      marginBottom: 10,
+      marginBottom: 6,
       flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     C: C,
     onClick: () => onAddParent("m")
-  }, "+ والد"), /*#__PURE__*/React.createElement(Btn, {
+  }, "+ والد"), /*#__PURE__*/React.createElement("span", {
+    style: familyMode ? {} : {
+      opacity: 0.45
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     C: C,
-    onClick: () => onAddParent("f")
-  }, "+ والدة"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: familyMode ? () => onAddParent("f") : onUnlock
+  }, "+ والدة")), /*#__PURE__*/React.createElement(Btn, {
     C: C,
     onClick: () => onAddChild("m")
-  }, "+ ابن"), /*#__PURE__*/React.createElement(Btn, {
+  }, "+ ابن"), /*#__PURE__*/React.createElement("span", {
+    style: familyMode ? {} : {
+      opacity: 0.45
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     C: C,
-    onClick: () => onAddChild("f")
-  }, "+ بنت"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: familyMode ? () => onAddChild("f") : onUnlock
+  }, "+ بنت")), /*#__PURE__*/React.createElement("span", {
+    style: familyMode || person.gender === "f" ? {} : {
+      opacity: 0.45
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     C: C,
-    onClick: onAddSpouse
-  }, "+ ", person.gender === "f" ? "زوج" : "زوجة")), /*#__PURE__*/React.createElement("button", {
+    onClick: familyMode || person.gender === "f" ? onAddSpouse : onUnlock
+  }, "+ ", person.gender === "f" ? "زوج" : "زوجة"))), !familyMode && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.sub,
+      marginBottom: 10,
+      lineHeight: 1.8
+    }
+  }, "🔒 إضافة الإناث (والدة، بنت، زوجة) تظهر في الوضع العائلي فقط — اضغط أحد الأزرار الباهتة لإدخال رمز العائلة."), /*#__PURE__*/React.createElement("button", {
     onClick: onRadial,
     style: {
       width: "100%",

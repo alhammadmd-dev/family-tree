@@ -1325,6 +1325,20 @@ function FamilyTree() {
                     <React.Fragment key={id}>
                       <MiniNode C={C} p={p} x={q.x} y={q.y} photo={photos[id]}
                         selected={id === selectedId} onTap={(pid) => onNodeClick(pid)} />
+                      {spousesOf(id).map((sp, i) => (
+                        <div key={sp} onClick={(e) => { e.stopPropagation(); onNodeClick(sp); }}
+                          title={pmap[sp]?.name || ""} style={{
+                            position: "absolute", left: q.x + 30, top: q.y - 38 - i * 26,
+                            width: 30, height: 30, borderRadius: "50%", overflow: "hidden",
+                            border: `2px ${pmap[sp]?.deceased ? "dashed" : "solid"} #b06a84`,
+                            background: "#f4e9ee", display: "grid", placeItems: "center",
+                            cursor: "pointer", zIndex: 2, boxShadow: "0 1px 4px rgba(0,0,0,.15)",
+                          }}>
+                          {photos[sp]
+                            ? <img src={photos[sp]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            : <span style={{ fontFamily: "'Amiri',serif", fontSize: 13, color: "#8c5a70" }}>{pmap[sp]?.name?.[0] || "؟"}</span>}
+                        </div>
+                      ))}
                       {kn > 0 && (
                         <div onClick={(e) => {
                           e.stopPropagation();
@@ -1580,6 +1594,7 @@ function FamilyTree() {
                     onName={(v) => updatePerson(selected.id, { name: v })}
                     onNameCommit={(v) => addLog(`تعديل الاسم إلى: ${v}`)}
                     onNickname={(v) => updatePerson(selected.id, { nickname: v })}
+                    onBio={(v) => updatePerson(selected.id, { bio: v })}
                     onGender={(v) => updatePerson(selected.id, { gender: v },
                       `تعديل الجنس (${selected.name}): ${v === "f" ? "أنثى" : "ذكر"}`)}
                     onDob={(v) => updatePerson(selected.id, { dob: v })}
@@ -1897,6 +1912,13 @@ function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdi
       {chain.length > 0 && (
         <div style={{ fontSize: 13, color: C.sub, textAlign: "center", lineHeight: 1.9, marginBottom: 4 }}>
           {person.name} {bin} {chain.map(a => a.name).join(" بن ")}
+        </div>
+      )}
+
+      {person.bio && (
+        <div>
+          <div style={sect}>نبذة</div>
+          <div style={{ fontSize: 13.5, lineHeight: 2, whiteSpace: "pre-line", color: C.parch }}>{person.bio}</div>
         </div>
       )}
 
@@ -2229,7 +2251,7 @@ function VInput({ C, label, value, onChange, field, placeholder, inputMode }) {
 }
 
 function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onName, onNameCommit,
-  onNickname, onGender, onDob, onDod, onElderly, onContact, onPoc, onNote, onDeceased,
+  onNickname, onBio, onGender, onDob, onDod, onElderly, onContact, onPoc, onNote, onDeceased,
   onUpload, onRemovePhoto, onAddChild, onAddParent, onAddSpouse, onDelete, onRemoveEdge, onSelect, onUnlock }) {
   const label = { fontSize: 12, color: C.sub, marginBottom: 5, display: "block" };
   const inp = {
@@ -2269,11 +2291,15 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
       <label style={label}>الكنية / اللقب (أبو فلان…)</label>
       <input value={person.nickname || ""} onChange={e => onNickname(e.target.value)} style={inp} />
 
+      <label style={label}>نبذة مختصرة (سيرة، عمل، مواقف تُذكر…)</label>
+      <textarea value={person.bio || ""} onChange={e => onBio(e.target.value)} rows={4}
+        style={{ ...inp, resize: "vertical", minHeight: 72, fontFamily: "'Tajawal'", lineHeight: 1.8 }} />
+
       <label style={label}>الجنس</label>
       <select value={person.gender || "m"} onChange={e => onGender(e.target.value)}
         style={{ ...inp, appearance: "auto" }}>
         <option value="m">ذكر</option>
-        <option value="f">أنثى</option>
+        <option value="f" disabled={!familyMode && person.gender !== "f"}>أنثى</option>
       </select>
 
       <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, cursor: "pointer", fontSize: 14 }}>
@@ -2320,13 +2346,26 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
       <label style={label}>ملاحظة (الفرع، معلومات إضافية…)</label>
       <input value={person.note} onChange={e => onNote(e.target.value)} style={inp} />
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
         <Btn C={C} onClick={() => onAddParent("m")}>+ والد</Btn>
-        <Btn C={C} onClick={() => onAddParent("f")}>+ والدة</Btn>
+        <span style={familyMode ? {} : { opacity: 0.45 }}>
+          <Btn C={C} onClick={familyMode ? () => onAddParent("f") : onUnlock}>+ والدة</Btn>
+        </span>
         <Btn C={C} onClick={() => onAddChild("m")}>+ ابن</Btn>
-        <Btn C={C} onClick={() => onAddChild("f")}>+ بنت</Btn>
-        <Btn C={C} onClick={onAddSpouse}>+ {person.gender === "f" ? "زوج" : "زوجة"}</Btn>
+        <span style={familyMode ? {} : { opacity: 0.45 }}>
+          <Btn C={C} onClick={familyMode ? () => onAddChild("f") : onUnlock}>+ بنت</Btn>
+        </span>
+        <span style={familyMode || person.gender === "f" ? {} : { opacity: 0.45 }}>
+          <Btn C={C} onClick={familyMode || person.gender === "f" ? onAddSpouse : onUnlock}>
+            + {person.gender === "f" ? "زوج" : "زوجة"}
+          </Btn>
+        </span>
       </div>
+      {!familyMode && (
+        <div style={{ fontSize: 11, color: C.sub, marginBottom: 10, lineHeight: 1.8 }}>
+          🔒 إضافة الإناث (والدة، بنت، زوجة) تظهر في الوضع العائلي فقط — اضغط أحد الأزرار الباهتة لإدخال رمز العائلة.
+        </div>
+      )}
       <button onClick={onRadial} style={{
         width: "100%", padding: "10px", borderRadius: 7, border: "none",
         background: C.gold, color: "#fff", cursor: "pointer", fontFamily: "'Tajawal'",
