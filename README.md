@@ -3,10 +3,19 @@
 Interactive Arabic family tree (927 people, 9 generations) rebuilt from the original chart, with photos and verified links. Runs as a static site, no build step.
 
 ## Files
-- `index.html` — the app (React via CDN, runs in any browser)
-- `family-tree-data.json` — the tree data (names, links, fields) — small, loads first
-- `family-tree-photos.json` — the photo pack (base64 images), fetched lazily after the tree renders
+- `index.html` — page shell (fonts, vendored libraries, storage shim)
+- `app.jsx` — the application source (edit THIS file)
+- `app.js` — compiled output served to browsers — regenerate with `sh build.sh` after editing `app.jsx`
+- `vendor/` — self-hosted React + Firebase bundles (no third-party CDN at runtime)
+- `fonts/` — self-hosted Amiri/Tajawal Arabic fonts
+- `family-tree-data.json` — fallback tree data (names, links, fields)
+- `family-tree-photos.json` — fallback photo pack, fetched lazily
+- `firestore.rules` — Firestore security rules (paste into the Firebase console)
 - `.nojekyll` — tells GitHub Pages to serve files as-is
+
+## Development
+Edit `app.jsx`, then run `sh build.sh` (requires Node.js) to regenerate `app.js`,
+and commit both files. The site has no runtime build step and no CDN dependencies.
 
 ## Navigation
 - **Minimap** (bottom-right): shows the whole tree with the current viewport; click or drag to jump anywhere.
@@ -30,8 +39,8 @@ passcode via the **🔒 الوضع العائلي** button in the header.
 
 - The current passcode is `wazrah2026` — **change it before sharing the site**.
 - To change it: open the site, open the browser console, run
-  `await sha256hex("your-new-code")`, and paste the resulting hash into the
-  `FAMILY_CODE_HASH` constant in `index.html`.
+  `await sha256hex("your-new-code")`, paste the resulting hash into the
+  `FAMILY_CODE_HASH` constant in `app.jsx`, then run `sh build.sh` and commit.
 - ⚠️ This gate deters casual visitors only. The raw `family-tree-data.json` is still
   publicly downloadable, so anyone technical who has the URL can read its contents.
   Don't store anything there that must stay truly private.
