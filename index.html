@@ -2,7 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8"/>
-<meta name="robots" content="noindex, nofollow"/>
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>شجرة العائلة - الوزرة</title>
 <style>html,body,#root{margin:0;padding:0;height:100%;background:#f6f4ee;font-family:'Tajawal',sans-serif}
@@ -159,7 +159,8 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const NODE_W = 156;
 const NODE_H = 138;
 
-function resizeImage(file, max = 280) {
+// 512px keeps single photos ~30-60KB so a 1MB photo-chunk document holds ~25 of them
+function resizeImage(file, max = 512) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -273,7 +274,12 @@ function FamilyTree() {
         if (doc.id.startsWith("people-")) Object.assign(pplMap, doc.data());
         else if (doc.id.startsWith("edges-")) Object.assign(edgMap, doc.data());
       });
-      if (!meta) { setCloud(c => (c === "live" ? c : "empty")); return; }
+      if (!meta) {
+        // an empty from-cache snapshot means "offline", not "database is empty"
+        const offline = snap.metadata && snap.metadata.fromCache;
+        setCloud(c => (c === "live" ? c : offline ? "off" : "empty"));
+        return;
+      }
       const ppl = Object.values(pplMap)
         .sort((a, b) => ((a.g ?? 99) - (b.g ?? 99)) || (a.y - b.y) || (a.x - b.x));
       setPeople(ppl); setEdges(Object.values(edgMap));
@@ -355,18 +361,19 @@ function FamilyTree() {
   }, [cloud]);
 
   // ---------- Seed photo pack (only needed while not on the live cloud) ----------
+  const photoPackRef = useRef(false);
   useEffect(() => {
     if (cloud !== "off" && cloud !== "empty") return;
-    let alive = true;
+    if (photoPackRef.current) return;
+    photoPackRef.current = true;
     fetch("./family-tree-photos.json")
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (!alive || !d || !d.photos) return;
+        if (!d || !d.photos) return;
         setPhotos(prev => ({ ...d.photos, ...prev }));
         setPhotosReady(true);
       })
       .catch(() => {});
-    return () => { alive = false; };
   }, [cloud]);
 
   // ---------- One-time view init (apex zoom + deep link), any data source ----------
@@ -1433,8 +1440,36 @@ function ContactLinks({ C, person }) {
   );
 }
 
+function PhotoLightbox({ photo, name, onClose }) {
+  const [dim, setDim] = useState(null);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(20,18,14,.9)", zIndex: 120,
+      display: "grid", placeItems: "center", cursor: "zoom-out",
+    }}>
+      <div style={{ textAlign: "center", maxWidth: "94vw" }}>
+        <img src={photo} alt={name}
+          onLoad={e => setDim({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+          style={{ maxWidth: "94vw", maxHeight: "80vh", borderRadius: 10, boxShadow: "0 20px 60px rgba(0,0,0,.55)" }} />
+        <div style={{ color: "#f0ece2", fontFamily: "'Tajawal'", fontSize: 15, marginTop: 12, fontWeight: 600 }}>
+          {name}{dim ? ` — الأبعاد: ${dim.w} × ${dim.h} بكسل` : ""}
+        </div>
+        <div style={{ color: "#b7ae9d", fontFamily: "'Tajawal'", fontSize: 12, marginTop: 4 }}>
+          اضغط في أي مكان للإغلاق
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdit, onUnlock, onSelect, onRadial }) {
   const sect = { fontSize: 13, color: C.gold, margin: "16px 0 8px", fontWeight: 700 };
+  const [zoomPhoto, setZoomPhoto] = useState(false);
 
   // paternal lineage chain: فلان بن فلان بن فلان…
   const chain = [];
@@ -1456,14 +1491,28 @@ function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdi
   return (
     <div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 6 }}>
-        <div style={{
-          width: 96, height: 96, borderRadius: "50%", overflow: "hidden",
-          border: `3px solid ${person.gender === "f" ? "#b06a84" : C.gold}`,
-          background: "#d8c9a8", display: "grid", placeItems: "center", marginBottom: 10,
-        }}>
-          {photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            : <span style={{ fontFamily: "'Amiri',serif", fontSize: 40, color: "#8a754a" }}>{person.name?.[0] || "؟"}</span>}
-        </div>
+        {photo ? (
+          <div onClick={() => setZoomPhoto(true)} title="اضغط لعرض الصورة بالحجم الكامل"
+            style={{ cursor: "zoom-in", textAlign: "center", marginBottom: 10 }}>
+            <img src={photo} alt={`صورة ${person.name}`} style={{
+              maxWidth: "100%", maxHeight: 190, objectFit: "contain", display: "block",
+              borderRadius: 12, border: `3px solid ${person.gender === "f" ? "#b06a84" : C.gold}`,
+              boxShadow: "0 4px 14px rgba(0,0,0,.12)", margin: "0 auto",
+            }} />
+            <div style={{ fontSize: 11, color: C.sub, marginTop: 5 }}>🔍 اضغط للتكبير</div>
+          </div>
+        ) : (
+          <div style={{
+            width: 96, height: 96, borderRadius: "50%", overflow: "hidden",
+            border: `3px solid ${person.gender === "f" ? "#b06a84" : C.gold}`,
+            background: "#d8c9a8", display: "grid", placeItems: "center", marginBottom: 10,
+          }}>
+            <span style={{ fontFamily: "'Amiri',serif", fontSize: 40, color: "#8a754a" }}>{person.name?.[0] || "؟"}</span>
+          </div>
+        )}
+        {zoomPhoto && photo && (
+          <PhotoLightbox photo={photo} name={person.name} onClose={() => setZoomPhoto(false)} />
+        )}
         <div style={{ fontFamily: "'Amiri',serif", fontSize: 22, fontWeight: 700, color: "#2c2415", textAlign: "center" }}>
           {person.name}
         </div>
