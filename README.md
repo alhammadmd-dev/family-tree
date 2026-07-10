@@ -51,9 +51,12 @@ database is seeded, the tree becomes **shared and live**: every edit and photo u
 is stored centrally, appears for all visitors within a second, and is recorded in a
 wiki-style history (السجل) with editor attribution and one-click revert.
 
-**Editing requires sign-in**: family members sign in with Google and request edit
-access; the admin (`alhammad.md@gmail.com`) approves them in the الإدارة tab.
+**Editing requires sign-in only (open model)**: any family member who signs in with
+Google can edit immediately — no approval step. Every edit is attributed to their
+account in the السجل history and can be reverted there by any signed-in user.
 Viewing stays public, with the sensitive layer still behind the family code.
+The admin (`alhammad.md@gmail.com`) can additionally delete history entries and
+perform full restores via "استيراد".
 
 One-time console setup (Firebase console → project):
 1. **Firestore Database** — create it (done).
