@@ -1551,18 +1551,19 @@ function FamilyTree() {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      width: 36,
-      height: 36,
+      padding: "7px 13px",
       borderRadius: 8,
       display: "grid",
       placeItems: "center",
       background: C.gold,
       color: "#ffffff",
       fontWeight: 700,
-      fontSize: 20,
-      fontFamily: "'Amiri', serif"
+      fontSize: 17,
+      fontFamily: "'Amiri', serif",
+      whiteSpace: "nowrap",
+      lineHeight: 1
     }
-  }, "ش"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, "آل وزرة"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: "'Amiri', serif",
       fontSize: 22,
@@ -1668,7 +1669,16 @@ function FamilyTree() {
       flexShrink: 0,
       zIndex: 28
     }
-  }, [["tree", "🌳 الشجرة"], ["list", "📋 القائمة"], ["focus", "👤 المحور"], ["classic", "🗺️ الكلاسيكي"]].map(([k, l]) => /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      alignSelf: "center",
+      fontSize: 12.5,
+      color: C.sub,
+      fontWeight: 700,
+      flexShrink: 0,
+      marginLeft: 2
+    }
+  }, "العرض:"), [["tree", "🌳 الشجرة"], ["list", "📋 القائمة"], ["focus", "👤 المحور"], ["classic", "🗺️ الكلاسيكي"]].map(([k, l]) => /*#__PURE__*/React.createElement("button", {
     key: k,
     onClick: () => setViewMode(k),
     style: {

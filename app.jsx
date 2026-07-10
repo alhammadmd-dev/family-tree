@@ -1049,10 +1049,10 @@ function FamilyTree() {
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{
-            width: 36, height: 36, borderRadius: 8, display: "grid", placeItems: "center",
-            background: C.gold, color: "#ffffff", fontWeight: 700, fontSize: 20,
-            fontFamily: "'Amiri', serif",
-          }}>ش</div>
+            padding: "7px 13px", borderRadius: 8, display: "grid", placeItems: "center",
+            background: C.gold, color: "#ffffff", fontWeight: 700, fontSize: 17,
+            fontFamily: "'Amiri', serif", whiteSpace: "nowrap", lineHeight: 1,
+          }}>آل وزرة</div>
           <div>
             <div style={{ fontFamily: "'Amiri', serif", fontSize: 22, fontWeight: 700, color: C.gold, lineHeight: 1.1 }}>
               شجرة العائلة
@@ -1109,6 +1109,7 @@ function FamilyTree() {
         display: "flex", gap: 6, padding: "7px 12px", borderBottom: `1px solid ${C.border}`,
         background: C.panel, overflowX: "auto", flexShrink: 0, zIndex: 28,
       }}>
+        <span style={{ alignSelf: "center", fontSize: 12.5, color: C.sub, fontWeight: 700, flexShrink: 0, marginLeft: 2 }}>العرض:</span>
         {[["tree", "🌳 الشجرة"], ["list", "📋 القائمة"], ["focus", "👤 المحور"], ["classic", "🗺️ الكلاسيكي"]].map(([k, l]) => (
           <button key={k} onClick={() => setViewMode(k)} style={{
             padding: "6px 14px", borderRadius: 16, whiteSpace: "nowrap", cursor: "pointer",
