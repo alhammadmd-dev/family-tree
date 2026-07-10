@@ -44,9 +44,32 @@ death), `deceased`, `elderly`, `contacts` (`{whatsapp, linkedin, twitter}`), and
 (the id of a living relative shown as point of contact for deceased/elderly members).
 Edges support `type: "spouse"` for marriage links; parent→child edges need no type.
 
-## Updating the published tree
+## Live shared tree (Firebase)
 
-- Edits and any photos you upload in the app are saved in your own browser (localStorage); they are personal to your device, not pushed to the repo.
-- To update the public tree for everyone, edit `family-tree-data.json`, **increment its
-  top-level `version` number**, and re-upload it. Visitors with an older local copy get
-  a banner offering to update to the new official version.
+The app connects to Firebase project `family-tree-alwazrah` (Firestore). Once the
+database is seeded, the tree becomes **shared and live**: every edit and photo upload
+is stored centrally, appears for all visitors within a second, and is recorded in a
+wiki-style history (السجل) with editor attribution and one-click revert.
+
+**Editing requires sign-in**: family members sign in with Google and request edit
+access; the admin (`alhammad.md@gmail.com`) approves them in the الإدارة tab.
+Viewing stays public, with the sensitive layer still behind the family code.
+
+One-time console setup (Firebase console → project):
+1. **Firestore Database** — create it (done).
+2. **Rules** — paste the contents of `firestore.rules` and Publish.
+3. **Authentication → Sign-in method** — enable **Google**.
+4. **Authentication → Settings → Authorized domains** — add `alhammadmd-dev.github.io`.
+5. Open the site, sign in with the admin account, and click **"رفع البيانات إلى السحابة"**.
+
+If Firebase is unreachable or not yet seeded, the app automatically falls back to the
+static JSON files below (read-mostly, per-device localStorage editing as before).
+
+## Updating the published tree (fallback mode only)
+
+- In fallback mode, edits and photos live in each visitor's browser (localStorage).
+- To update the static tree, edit `family-tree-data.json`, **increment its top-level
+  `version` number**, and re-upload it. Visitors with an older local copy get a banner
+  offering to update.
+- Once the cloud is live these static files serve only as the emergency fallback —
+  refresh them occasionally from the "تصدير" backup.

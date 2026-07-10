@@ -1,0 +1,60 @@
+rules_version = '2';
+
+// Al-Wazrah family tree — Firestore security rules.
+// Paste into: Firebase console → Firestore Database → Rules → Publish.
+//
+// Model:
+//  - Anyone can READ the tree, photos and edit history (same as the public site).
+//  - Only approved editors (config/access.editors) and admins can WRITE.
+//  - The bootstrap admin email below can always act as admin, so the very first
+//    sign-in can create config/access and seed the database.
+
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function accessData() { return get(/databases/$(db)/documents/config/access).data; }
+    function accessExists() { return exists(/databases/$(db)/documents/config/access); }
+    function isAdmin() {
+      return signedIn() && (
+        request.auth.token.email == 'alhammad.md@gmail.com'
+        || (accessExists() && request.auth.token.email in accessData().admins)
+      );
+    }
+    function isEditor() {
+      return isAdmin() || (
+        signedIn() && accessExists()
+        && request.auth.token.email in accessData().editors
+      );
+    }
+
+    match /tree/{doc} {
+      allow read: if true;
+      allow write: if isEditor();
+    }
+
+    match /photos/{doc} {
+      allow read: if true;
+      allow write: if isEditor();
+    }
+
+    match /revisions/{doc} {
+      allow read: if true;
+      allow create: if isEditor();
+      allow update, delete: if isAdmin();
+    }
+
+    match /config/access {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // access requests: any signed-in user may file exactly one under their uid
+    match /requests/{uid} {
+      allow create: if signedIn() && request.auth.uid == uid;
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow delete: if isAdmin();
+      allow update: if false;
+    }
+  }
+}

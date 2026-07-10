@@ -10,6 +10,9 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone@7/babel.min.js" crossorigin></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" crossorigin></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js" crossorigin></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js" crossorigin></script>
 </head>
 <body>
 <div id="root"><div id="boot">جارٍ التحميل…</div></div>
@@ -25,6 +28,34 @@ window.storage = {
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef, useCallback } = React;
 let SEED = { people:[], edges:[], photos:{}, log:[] };
+
+// ====================== Firebase (live shared tree) ======================
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCVvZxJW2VXT3dcaAlIEKiq9UxZ3Xo1jjw",
+  authDomain: "family-tree-alwazrah.firebaseapp.com",
+  projectId: "family-tree-alwazrah",
+  storageBucket: "family-tree-alwazrah.firebasestorage.app",
+  messagingSenderId: "203702835559",
+  appId: "1:203702835559:web:3a09a8fcf403afe65fb7c2",
+};
+const ADMIN_EMAIL = "alhammad.md@gmail.com";
+let FB = null;
+try {
+  if (typeof firebase !== "undefined" && firebase.initializeApp) {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    FB = { db: firebase.firestore(), auth: firebase.auth() };
+  }
+} catch (e) { console.error("firebase init failed", e); }
+
+// data is stored in a few chunked documents (not one per person) to stay
+// far inside Firestore's free read quota: ~30 doc reads per visit
+const PEOPLE_CHUNKS = 8, EDGE_CHUNKS = 4, PHOTO_CHUNKS = 24;
+const chunkOf = (id, n) => {
+  let h = 0; const s = String(id);
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h % n;
+};
+const FV = () => firebase.firestore.FieldValue;
 
 
 
@@ -81,9 +112,44 @@ function ageOf(p) {
 }
 const mercy = (p) => p.gender === "f" ? "رحمها الله" : "رحمه الله";
 
+const AR_MONTHS = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+const fmtDate = (v) => {
+  const m = String(v || "").match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?/);
+  if (!m) return v || "";
+  return (m[3] ? +m[3] + " " : "") + (m[2] ? AR_MONTHS[+m[2] - 1] + " " : "") + m[1];
+};
+
 const waLink = (v) => { const d = String(v || "").replace(/\D/g, ""); return d ? `https://wa.me/${d}` : null; };
 const liLink = (v) => { v = String(v || "").trim(); return !v ? null : (/^https?:/.test(v) ? v : `https://www.linkedin.com/in/${encodeURIComponent(v)}`); };
 const twLink = (v) => { v = String(v || "").trim().replace(/^@/, ""); return !v ? null : (/^https?:/.test(v) ? v : `https://x.com/${v}`); };
+const mailLink = (v) => { v = String(v || "").trim(); return v && v.includes("@") ? `mailto:${v}` : null; };
+
+// per-field input restriction (strips disallowed characters as the user types)
+const fieldFilters = {
+  whatsapp: (v) => v.replace(/[^\d+ ]/g, ""),
+  email: (v) => v.replace(/\s/g, ""),
+  linkedin: (v) => v.replace(/\s/g, ""),
+  twitter: (v) => v.replace(/\s/g, ""),
+};
+// per-field validation (empty = valid; returns an Arabic error message otherwise)
+const fieldValidators = {
+  whatsapp: (v) => {
+    if (!v) return "";
+    const d = v.replace(/\D/g, "");
+    return d.length >= 8 && d.length <= 15 ? "" : "أدخل رقمًا دوليًا صحيحًا (٨ إلى ١٥ رقمًا، مثل ‎+9665xxxxxxxx)";
+  },
+  email: (v) => !v || /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v) ? "" : "بريد إلكتروني غير صحيح",
+  linkedin: (v) => {
+    if (!v) return "";
+    if (/^https?:\/\//.test(v)) return /linkedin\.com\//.test(v) ? "" : "الرابط يجب أن يكون من linkedin.com";
+    return /^[A-Za-z0-9\-_.]{3,100}$/.test(v) ? "" : "أدخل اسم مستخدم صحيحًا أو رابط linkedin.com كاملًا";
+  },
+  twitter: (v) => {
+    if (!v) return "";
+    if (/^https?:\/\//.test(v)) return /(x\.com|twitter\.com)\//.test(v) ? "" : "الرابط يجب أن يكون من x.com";
+    return /^@?[A-Za-z0-9_]{1,15}$/.test(v) ? "" : "اسم مستخدم غير صحيح (أحرف إنجليزية وأرقام و _ فقط)";
+  },
+};
 
 // ====== Seed data (from transcription) ======
 
@@ -144,6 +210,21 @@ function FamilyTree() {
   const [updateAvail, setUpdateAvail] = useState(false);
   const [isMobile, setIsMobile] = useState(typeof window !== "undefined" && window.innerWidth < 700);
 
+  // cloud / auth state
+  const [cloud, setCloud] = useState(FB ? "connecting" : "off"); // connecting | live | empty | off
+  const [user, setUser] = useState(null);
+  const [access, setAccess] = useState(null);         // {admins, editors}
+  const [requests, setRequests] = useState([]);       // pending access requests (admin only)
+  const [revisions, setRevisions] = useState([]);     // cloud edit history
+  const [busyMsg, setBusyMsg] = useState("");
+  const [photosReady, setPhotosReady] = useState(false);
+  const [reqSent, setReqSent] = useState(false);
+
+  const cloudLive = cloud === "live";
+  const isAdmin = !!user && (user.email === ADMIN_EMAIL || (access?.admins || []).includes(user.email));
+  const isEditor = isAdmin || (!!user && (access?.editors || []).includes(user.email));
+  const canEdit = !cloudLive || isEditor;
+
   useEffect(() => {
     const onResize = () => setIsMobile(window.innerWidth < 700);
     window.addEventListener("resize", onResize);
@@ -169,8 +250,80 @@ function FamilyTree() {
     document.head.appendChild(l);
   }, []);
 
-  // ---------- Initial load ----------
+  // ---------- Family mode flag (independent of data source) ----------
   useEffect(() => {
+    (async () => {
+      const fm = await store.get(FAMILY_KEY);
+      if (fm === FAMILY_CODE_HASH) setFamilyMode(true);
+    })();
+  }, []);
+
+  // if the cloud can't be reached quickly, fall back to the static data
+  // (a late successful connection still upgrades the app to live mode)
+  useEffect(() => {
+    if (!FB) return;
+    const t = setTimeout(() => setCloud(c => c === "connecting" ? "off" : c), 6000);
+    return () => clearTimeout(t);
+  }, []);
+
+  // ---------- Cloud: live tree subscription ----------
+  useEffect(() => {
+    if (!FB) return;
+    const un = FB.db.collection("tree").onSnapshot(snap => {
+      let meta = null; const pplMap = {}, edgMap = {};
+      snap.forEach(doc => {
+        if (doc.id === "meta") { meta = doc.data(); return; }
+        if (doc.id.startsWith("people-")) Object.assign(pplMap, doc.data());
+        else if (doc.id.startsWith("edges-")) Object.assign(edgMap, doc.data());
+      });
+      if (!meta) { setCloud(c => (c === "live" ? c : "empty")); return; }
+      const ppl = Object.values(pplMap)
+        .sort((a, b) => ((a.g ?? 99) - (b.g ?? 99)) || (a.y - b.y) || (a.x - b.x));
+      setPeople(ppl); setEdges(Object.values(edgMap));
+      setCloud("live"); setLoading(false); loadedRef.current = true;
+    }, () => setCloud(c => (c === "live" ? c : "off")));
+    return un;
+  }, []);
+
+  // ---------- Cloud: photos subscription ----------
+  useEffect(() => {
+    if (!FB || !cloudLive) return;
+    const un = FB.db.collection("photos").onSnapshot(snap => {
+      const ph = {}; snap.forEach(d => Object.assign(ph, d.data()));
+      setPhotos(ph); setPhotosReady(true);
+    }, () => {});
+    return un;
+  }, [cloudLive]);
+
+  // ---------- Cloud: auth / access / requests / history ----------
+  useEffect(() => { if (FB) return FB.auth.onAuthStateChanged(u => setUser(u)); }, []);
+  useEffect(() => {
+    if (!FB || !user) { setAccess(null); return; }
+    setReqSent(localStorage.getItem("ft:req:" + user.uid) === "1");
+    return FB.db.doc("config/access").onSnapshot(
+      d => setAccess(d.exists ? d.data() : null), () => {});
+  }, [user]);
+  useEffect(() => {
+    if (!FB || !isAdmin || cloud === "off" || cloud === "connecting") { setRequests([]); return; }
+    return FB.db.collection("requests").onSnapshot(s => {
+      const a = []; s.forEach(d => a.push({ uid: d.id, ...d.data() }));
+      a.sort((x, y) => (y.ts || 0) - (x.ts || 0)); setRequests(a);
+    }, () => {});
+  }, [user, access, cloud]);
+  useEffect(() => {
+    if (!FB || !cloudLive) return;
+    return FB.db.collection("revisions").orderBy("ts", "desc").limit(100)
+      .onSnapshot(s => {
+        const a = []; s.forEach(d => a.push({ id: d.id, ...d.data() })); setRevisions(a);
+      }, () => {});
+  }, [cloudLive]);
+
+  // ---------- Local fallback (no cloud, or cloud not yet seeded) ----------
+  const localLoadedRef = useRef(false);
+  useEffect(() => {
+    if (cloud !== "off" && cloud !== "empty") return;
+    if (localLoadedRef.current) return;
+    localLoadedRef.current = true;
     (async () => {
       const raw = await store.get(TREE_KEY);
       let p = [], e = [];
@@ -180,10 +333,6 @@ function FamilyTree() {
       const lg = await store.get(LOG_KEY);
       let logArr = [];
       if (lg) { try { logArr = JSON.parse(lg) || []; } catch {} }
-
-      // family mode: unlocked previously on this device with the current code
-      const fm = await store.get(FAMILY_KEY);
-      if (fm === FAMILY_CODE_HASH) setFamilyMode(true);
 
       // First run (no stored data): seed from the transcription
       let seeded = false;
@@ -207,50 +356,52 @@ function FamilyTree() {
       }
       setLog(logArr);
 
-      // photos: user uploads first (from storage); the seed photo pack loads lazily below
+      // photos: user uploads (from storage) sit on top of the seed pack below
       const ph = { ...SEED.photos };
       const keys = await store.list("ft:photo:");
       for (const k of keys) {
         const v = await store.get(k);
         if (v) ph[k.replace("ft:photo:", "")] = v;
       }
-      setPhotos(ph);
-
-      // open zoomed onto the top-left (apex) so names are readable; use search/zoom to navigate
-      {
-        const r = canvasRef.current?.getBoundingClientRect();
-        const vw = r ? r.width : 900, vh = r ? r.height : 600;
-        const n0 = p[0] || { x: 0, y: 120 };
-        const s0 = vw < 700 ? 1.1 : 0.62;
-        setView({ s: s0, tx: vw / 2 - n0.x * s0, ty: Math.max(24, vh * 0.16) - n0.y * s0 });
-
-        // deep link: #p=<id> opens focused on that person (females only in family mode)
-        const m = window.location.hash.match(/^#p=(.+)$/);
-        const target = m && p.find(x => x.id === decodeURIComponent(m[1]));
-        if (target && (target.gender !== "f" || fm === FAMILY_CODE_HASH)) {
-          setView({ s: 1, tx: vw / 2 - target.x, ty: vh / 2 - target.y });
-          setSelectedId(target.id); setTab("view"); setShowPanel(true);
-        }
-      }
+      setPhotos(prev => ({ ...ph, ...prev }));
 
       setLoading(false);
       loadedRef.current = true;
     })();
-  }, []);
+  }, [cloud]);
 
-  // ---------- Seed photo pack (large file, loaded after first paint) ----------
+  // ---------- Seed photo pack (only needed while not on the live cloud) ----------
   useEffect(() => {
+    if (cloud !== "off" && cloud !== "empty") return;
     let alive = true;
     fetch("./family-tree-photos.json")
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         if (!alive || !d || !d.photos) return;
-        // seed photos sit under any photos the user uploaded on this device
         setPhotos(prev => ({ ...d.photos, ...prev }));
+        setPhotosReady(true);
       })
       .catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [cloud]);
+
+  // ---------- One-time view init (apex zoom + deep link), any data source ----------
+  const viewInitRef = useRef(false);
+  useEffect(() => {
+    if (viewInitRef.current || loading || !people.length) return;
+    viewInitRef.current = true;
+    const r = canvasRef.current?.getBoundingClientRect();
+    const vw0 = r ? r.width : 900, vh0 = r ? r.height : 600;
+    const n0 = people[0] || { x: 0, y: 120 };
+    const s0 = vw0 < 700 ? 1.1 : 0.62;
+    setView({ s: s0, tx: vw0 / 2 - n0.x * s0, ty: Math.max(24, vh0 * 0.16) - n0.y * s0 });
+    const m = window.location.hash.match(/^#p=(.+)$/);
+    const target = m && people.find(x => x.id === decodeURIComponent(m[1]));
+    if (target && (target.gender !== "f" || familyMode)) {
+      setView({ s: 1, tx: vw0 / 2 - target.x, ty: vh0 / 2 - target.y });
+      setSelectedId(target.id); setTab("view"); setShowPanel(true);
+    }
+  }, [loading, people, familyMode]);
 
   // ---------- Keep #p=<id> in the URL for shareable links ----------
   useEffect(() => {
@@ -277,14 +428,14 @@ function FamilyTree() {
     return () => window.removeEventListener("hashchange", onHash);
   }, [people, familyMode, selectedId]);
 
-  // ---------- Persist tree (debounced) ----------
+  // ---------- Persist tree locally (fallback mode only; the cloud is its own store) ----------
   useEffect(() => {
-    if (!loadedRef.current) return;
+    if (!loadedRef.current || cloudLive) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       store.set(TREE_KEY, JSON.stringify({ people, edges }));
     }, 400);
-  }, [people, edges]);
+  }, [people, edges, cloudLive]);
 
   // ---------- Logging ----------
   const addLog = useCallback((text) => {
@@ -322,6 +473,130 @@ function FamilyTree() {
     addLog(`تحديث الشجرة إلى النسخة الرسمية (v${SEED.version || 1})`);
   };
 
+  // ====================== Cloud write helpers ======================
+  const cloudWritePeople = (persons) => {
+    if (!cloudLive) return Promise.resolve();
+    const byChunk = {};
+    persons.forEach(p => { (byChunk[chunkOf(p.id, PEOPLE_CHUNKS)] ||= {})[p.id] = p; });
+    const batch = FB.db.batch();
+    Object.entries(byChunk).forEach(([c, m]) => batch.set(FB.db.doc("tree/people-" + c), m, { merge: true }));
+    return batch.commit().catch(e => window.alert("تعذر الحفظ: " + (e.message || "")));
+  };
+  const cloudWriteEdges = (es) => {
+    if (!cloudLive) return Promise.resolve();
+    const byChunk = {};
+    es.forEach(e => { (byChunk[chunkOf(e.id, EDGE_CHUNKS)] ||= {})[e.id] = e; });
+    const batch = FB.db.batch();
+    Object.entries(byChunk).forEach(([c, m]) => batch.set(FB.db.doc("tree/edges-" + c), m, { merge: true }));
+    return batch.commit().catch(e => window.alert("تعذر الحفظ: " + (e.message || "")));
+  };
+  const cloudDeleteEdges = (ids) => {
+    if (!cloudLive || !ids.length) return Promise.resolve();
+    const batch = FB.db.batch();
+    ids.forEach(eid => batch.update(FB.db.doc("tree/edges-" + chunkOf(eid, EDGE_CHUNKS)), { [eid]: FV().delete() }));
+    return batch.commit().catch(() => {});
+  };
+  const cloudRevision = (text, extra) => {
+    if (!cloudLive) return;
+    FB.db.collection("revisions").add({
+      ts: Date.now(), uid: user?.uid || "", name: user?.displayName || user?.email || "",
+      text, ...(extra || {}),
+    }).catch(() => {});
+  };
+
+  // ====================== Auth / access ======================
+  const signIn = async () => {
+    try { await FB.auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); }
+    catch (e) { if (e?.code !== "auth/popup-closed-by-user") window.alert("تعذر تسجيل الدخول: " + (e.message || "")); }
+  };
+  const signOut = () => FB.auth.signOut();
+  const requestAccess = async () => {
+    try {
+      await FB.db.doc("requests/" + user.uid).set({ email: user.email, name: user.displayName || "", ts: Date.now() });
+      localStorage.setItem("ft:req:" + user.uid, "1"); setReqSent(true);
+    } catch (e) { window.alert("تعذر إرسال الطلب: " + (e.message || "")); }
+  };
+  const approveRequest = async (r) => {
+    try {
+      await FB.db.doc("config/access").set({
+        admins: FV().arrayUnion(ADMIN_EMAIL), editors: FV().arrayUnion(r.email),
+      }, { merge: true });
+      await FB.db.doc("requests/" + r.uid).delete();
+      cloudRevision(`منح صلاحية التحرير لـ ${r.name || r.email}`);
+    } catch (e) { window.alert("تعذر القبول: " + (e.message || "")); }
+  };
+  const rejectRequest = (r) => FB.db.doc("requests/" + r.uid).delete().catch(() => {});
+  const removeEditor = async (email) => {
+    if (!window.confirm(`سحب صلاحية التحرير من ${email}؟`)) return;
+    await FB.db.doc("config/access").set({ editors: FV().arrayRemove(email) }, { merge: true }).catch(() => {});
+    cloudRevision(`سحب صلاحية التحرير من ${email}`);
+  };
+
+  // ====================== Seed / restore the cloud database ======================
+  const seedToCloud = async (p, e, ph) => {
+    setBusyMsg("جارٍ رفع البيانات إلى السحابة…");
+    try {
+      const pc = {}, ec = {}, phc = {};
+      p.forEach(x => { (pc[chunkOf(x.id, PEOPLE_CHUNKS)] ||= {})[x.id] = x; });
+      e.forEach(x => { (ec[chunkOf(x.id, EDGE_CHUNKS)] ||= {})[x.id] = x; });
+      Object.entries(ph || {}).forEach(([id, v]) => { (phc[chunkOf(id, PHOTO_CHUNKS)] ||= {})[id] = v; });
+      const batch = FB.db.batch();
+      for (let i = 0; i < PEOPLE_CHUNKS; i++) batch.set(FB.db.doc("tree/people-" + i), pc[i] || {});
+      for (let i = 0; i < EDGE_CHUNKS; i++) batch.set(FB.db.doc("tree/edges-" + i), ec[i] || {});
+      for (let i = 0; i < PHOTO_CHUNKS; i++) batch.set(FB.db.doc("photos/c" + i), phc[i] || {});
+      await batch.commit();
+      await FB.db.doc("config/access").set({ admins: FV().arrayUnion(ADMIN_EMAIL) }, { merge: true });
+      // meta last: listeners flip to "live" only once all data is in place
+      await FB.db.doc("tree/meta").set({ seeded: true, ts: Date.now(), version: SEED.version || 2 });
+      FB.db.collection("revisions").add({
+        ts: Date.now(), uid: user?.uid || "", name: user?.displayName || "",
+        text: `رفع الشجرة إلى السحابة (${p.length} فرد، ${Object.keys(ph || {}).length} صورة)`,
+      }).catch(() => {});
+    } catch (err) { window.alert("فشل الرفع: " + (err.message || "")); }
+    setBusyMsg("");
+  };
+  const seedCloudFromCurrent = () => {
+    if (!window.confirm(`سيتم رفع ${people.length} فردًا و ${Object.keys(photos).length} صورة إلى قاعدة البيانات السحابية. بعدها تصبح الشجرة مشتركة ومباشرة للجميع. متابعة؟`)) return;
+    seedToCloud(people, edges, photos);
+  };
+
+  // ====================== Wiki revert ======================
+  const revertRevision = async (rev) => {
+    if (!isEditor) return;
+    if (!window.confirm(`التراجع عن: ${rev.text}؟`)) return;
+    try {
+      if (rev.kind === "update" && rev.personId && rev.before) {
+        const cur = people.find(p => p.id === rev.personId);
+        if (!cur) return window.alert("الشخص لم يعد موجودًا في الشجرة.");
+        const restored = { ...cur, ...rev.before };
+        setPeople(prev => prev.map(p => p.id === rev.personId ? restored : p));
+        await cloudWritePeople([restored]);
+      } else if (rev.kind === "add" && rev.personId) {
+        const eids = edges.filter(e => e.from === rev.personId || e.to === rev.personId).map(e => e.id);
+        setPeople(prev => prev.filter(p => p.id !== rev.personId));
+        setEdges(prev => prev.filter(e => e.from !== rev.personId && e.to !== rev.personId));
+        await FB.db.doc("tree/people-" + chunkOf(rev.personId, PEOPLE_CHUNKS)).update({ [rev.personId]: FV().delete() });
+        await cloudDeleteEdges(eids);
+      } else if (rev.kind === "delete" && rev.before?.person) {
+        const pr = rev.before.person, es = rev.before.edges || [];
+        setPeople(prev => [...prev.filter(x => x.id !== pr.id), pr]);
+        setEdges(prev => [...prev.filter(e => !es.some(x => x.id === e.id)), ...es]);
+        await cloudWritePeople([pr]);
+        if (es.length) await cloudWriteEdges(es);
+      } else if (rev.kind === "edge-add" && rev.after?.edge) {
+        setEdges(prev => prev.filter(e => e.id !== rev.after.edge.id));
+        await cloudDeleteEdges([rev.after.edge.id]);
+      } else if (rev.kind === "edge-del" && rev.before?.edge) {
+        const ed = rev.before.edge;
+        setEdges(prev => [...prev.filter(x => x.id !== ed.id), ed]);
+        await cloudWriteEdges([ed]);
+      } else {
+        return window.alert("لا يمكن التراجع عن هذا النوع من التعديلات.");
+      }
+      cloudRevision(`تراجع عن: ${rev.text}`);
+    } catch (e) { window.alert("تعذر التراجع: " + (e.message || "")); }
+  };
+
   // ====================== Actions ======================
   const centerWorld = () => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -343,33 +618,65 @@ function FamilyTree() {
     setSelectedId(np.id);
     setTab("edit");
     addLog(`إضافة شخص جديد: ${np.name}`);
+    cloudWritePeople([np]);
+    cloudRevision(`إضافة شخص جديد: ${np.name}`, { kind: "add", personId: np.id });
     return np;
   };
 
+  // text edits flush to the cloud after a short pause, with one history entry per burst
+  const dirtyRef = useRef({});
   const updatePerson = (id, patch, logText) => {
     setPeople(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p));
     if (logText) addLog(logText);
+    if (!cloudLive) return;
+    const cur = people.find(p => p.id === id);
+    if (!cur) return;
+    const slot = (dirtyRef.current[id] ||= { before: { ...cur }, next: { ...cur } });
+    slot.next = { ...slot.next, ...patch };
+    clearTimeout(slot.timer);
+    slot.timer = setTimeout(() => {
+      const full = slot.next;
+      delete dirtyRef.current[id];
+      const keys = Object.keys(full).filter(k => JSON.stringify(full[k]) !== JSON.stringify(slot.before[k]));
+      if (!keys.length) return;
+      const pick = (o, ks) => ks.reduce((a, k) => (a[k] = o[k] === undefined ? null : o[k], a), {});
+      cloudWritePeople([full]);
+      cloudRevision(`تعديل بيانات ${full.name}`, {
+        kind: "update", personId: id, before: pick(slot.before, keys), after: pick(full, keys),
+      });
+    }, 1200);
   };
 
   const deletePerson = (id) => {
     const p = people.find(x => x.id === id);
     if (!p) return;
     if (!window.confirm(`حذف "${p.name}" وجميع روابطه؟`)) return;
+    const removedEdges = edges.filter(e => e.from === id || e.to === id);
     setPeople(prev => prev.filter(x => x.id !== id));
     setEdges(prev => prev.filter(e => e.from !== id && e.to !== id));
     setPhotos(prev => { const n = { ...prev }; delete n[id]; return n; });
     store.del(photoKey(id));
     if (selectedId === id) setSelectedId(null);
     addLog(`حذف الشخص: ${p.name}`);
+    if (cloudLive) {
+      FB.db.doc("tree/people-" + chunkOf(id, PEOPLE_CHUNKS)).update({ [id]: FV().delete() }).catch(() => {});
+      cloudDeleteEdges(removedEdges.map(e => e.id));
+      FB.db.doc("photos/c" + chunkOf(id, PHOTO_CHUNKS)).set({ [id]: FV().delete() }, { merge: true }).catch(() => {});
+      cloudRevision(`حذف الشخص: ${p.name}`, { kind: "delete", personId: id, before: { person: p, edges: removedEdges } });
+    }
   };
 
   const addEdge = (from, to, type) => {
     if (from === to) return;
     if (edges.some(e => e.from === from && e.to === to)) return;
-    setEdges(prev => [...prev, { id: uid(), from, to, ...(type && type !== "parent" ? { type } : {}) }]);
+    const edge = { id: uid(), from, to, ...(type && type !== "parent" ? { type } : {}) };
+    setEdges(prev => [...prev, edge]);
     const a = people.find(p => p.id === from)?.name || "";
     const b = people.find(p => p.id === to)?.name || "";
-    addLog(type === "spouse" ? `إضافة رابط زواج: ${a} ↔ ${b}` : `إضافة رابط: ${a} ← ${b}`);
+    const txt = type === "spouse" ? `إضافة رابط زواج: ${a} ↔ ${b}` : `إضافة رابط: ${a} ← ${b}`;
+    addLog(txt);
+    cloudWriteEdges([edge]);
+    cloudRevision(txt, { kind: "edge-add", after: { edge } });
   };
 
   const removeEdge = (eid) => {
@@ -379,6 +686,8 @@ function FamilyTree() {
     const a = people.find(p => p.id === e.from)?.name || "";
     const b = people.find(p => p.id === e.to)?.name || "";
     addLog(`حذف رابط: ${a} ← ${b}`);
+    cloudDeleteEdges([eid]);
+    cloudRevision(`حذف رابط: ${a} ← ${b}`, { kind: "edge-del", before: { edge: e } });
   };
 
   const addChild = (parentId, gender = "m") => {
@@ -389,8 +698,11 @@ function FamilyTree() {
       name: gender === "f" ? "بنت جديدة" : "ابن جديد",
       gender, g: parent.g != null ? parent.g + 1 : undefined,
     });
-    setEdges(prev => [...prev, { id: uid(), from: parentId, to: child.id }]);
+    const edge = { id: uid(), from: parentId, to: child.id };
+    setEdges(prev => [...prev, edge]);
     addLog(`ربط ${gender === "f" ? "بنت جديدة" : "ابن جديد"} بـ ${parent.name}`);
+    cloudWriteEdges([edge]);
+    cloudRevision(`ربط ${gender === "f" ? "بنت جديدة" : "ابن جديد"} بـ ${parent.name}`, { kind: "edge-add", after: { edge } });
   };
 
   const addParent = (childId, gender = "m") => {
@@ -401,8 +713,11 @@ function FamilyTree() {
       name: gender === "f" ? "والدة" : "والد",
       gender, g: child.g != null ? child.g - 1 : undefined,
     });
-    setEdges(prev => [...prev, { id: uid(), from: parent.id, to: childId }]);
+    const edge = { id: uid(), from: parent.id, to: childId };
+    setEdges(prev => [...prev, edge]);
     addLog(`ربط ${gender === "f" ? "والدة" : "والد"} بـ ${child.name}`);
+    cloudWriteEdges([edge]);
+    cloudRevision(`ربط ${gender === "f" ? "والدة" : "والد"} بـ ${child.name}`, { kind: "edge-add", after: { edge } });
   };
 
   const addSpouse = (personId) => {
@@ -414,8 +729,11 @@ function FamilyTree() {
       name: gender === "f" ? "زوجة" : "زوج",
       gender, g: p0.g,
     });
-    setEdges(prev => [...prev, { id: uid(), from: personId, to: sp.id, type: "spouse" }]);
+    const edge = { id: uid(), from: personId, to: sp.id, type: "spouse" };
+    setEdges(prev => [...prev, edge]);
     addLog(`ربط ${gender === "f" ? "زوجة" : "زوج"} بـ ${p0.name}`);
+    cloudWriteEdges([edge]);
+    cloudRevision(`ربط ${gender === "f" ? "زوجة" : "زوج"} بـ ${p0.name}`, { kind: "edge-add", after: { edge } });
   };
 
   const handlePhoto = async (id, file) => {
@@ -423,16 +741,27 @@ function FamilyTree() {
     try {
       const data = await resizeImage(file);
       setPhotos(prev => ({ ...prev, [id]: data }));
-      await store.set(photoKey(id), data);
       const nm = people.find(p => p.id === id)?.name || "";
+      if (cloudLive) {
+        await FB.db.doc("photos/c" + chunkOf(id, PHOTO_CHUNKS)).set({ [id]: data }, { merge: true });
+        cloudRevision(`رفع صورة لـ ${nm}`, { kind: "photo", personId: id });
+      } else {
+        await store.set(photoKey(id), data);
+      }
       addLog(`رفع صورة لـ ${nm}`);
     } catch { window.alert("تعذر تحميل الصورة"); }
   };
 
   const removePhoto = (id) => {
     setPhotos(prev => { const n = { ...prev }; delete n[id]; return n; });
-    store.del(photoKey(id));
-    addLog(`حذف صورة: ${people.find(p => p.id === id)?.name || ""}`);
+    const nm = people.find(p => p.id === id)?.name || "";
+    if (cloudLive) {
+      FB.db.doc("photos/c" + chunkOf(id, PHOTO_CHUNKS)).set({ [id]: FV().delete() }, { merge: true }).catch(() => {});
+      cloudRevision(`حذف صورة: ${nm}`, { kind: "photo", personId: id });
+    } else {
+      store.del(photoKey(id));
+    }
+    addLog(`حذف صورة: ${nm}`);
   };
 
   const onNodeClick = (id) => {
@@ -516,8 +845,15 @@ function FamilyTree() {
     try {
       const txt = await file.text();
       const d = JSON.parse(txt);
+      if (cloudLive) {
+        // full restore of the shared database (admin only — enforced by rules too)
+        if (!isAdmin) return window.alert("الاستعادة إلى قاعدة البيانات المشتركة متاحة للمشرف فقط.");
+        if (!window.confirm("سيتم استبدال الشجرة المشتركة بالكامل بمحتوى هذا الملف، للجميع. متابعة؟")) return;
+        await seedToCloud(d.people || [], d.edges || [], d.photos || {});
+        return;
+      }
       setPeople(d.people || []); setEdges(d.edges || []);
-      setPhotos(d.photos || {}); 
+      setPhotos(d.photos || {});
       await store.set(TREE_KEY, JSON.stringify({ people: d.people || [], edges: d.edges || [] }));
       for (const [id, data] of Object.entries(d.photos || {})) await store.set(photoKey(id), data);
       addLog("استيراد نسخة احتياطية");
@@ -583,27 +919,51 @@ function FamilyTree() {
               شجرة العائلة
             </div>
             <div style={{ fontSize: 11, color: C.sub }}>
-              {visPeople.length} فرد · {visEdges.length} رابط
+              {visPeople.length} فرد · {visEdges.length} رابط{cloudLive ? " · ☁ مباشر" : ""}
             </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {FB && cloud !== "off" && (user ? (
+            <Btn C={C} onClick={signOut} title={user.email}>
+              {(user.displayName || user.email || "").split(" ")[0]} · خروج
+            </Btn>
+          ) : (
+            <Btn C={C} onClick={signIn}>تسجيل الدخول</Btn>
+          ))}
           <Btn C={C} active={familyMode} onClick={() => familyMode ? lockFamily() : setShowUnlock(true)}>
             {familyMode ? "🔓 الوضع العائلي" : "🔒 الوضع العائلي"}
           </Btn>
-          <Btn C={C} onClick={() => addPerson()}>+ شخص</Btn>
-          <Btn C={C} active={linkMode} onClick={() => { setLinkMode(m => !m); setLinkFrom(null); }}>
-            {linkMode ? (linkFrom ? "اختر الثاني…" : "اختر الأول…") : "ربط شخصين"}
-          </Btn>
+          {canEdit && <Btn C={C} onClick={() => addPerson()}>+ شخص</Btn>}
+          {canEdit && (
+            <Btn C={C} active={linkMode} onClick={() => { setLinkMode(m => !m); setLinkFrom(null); }}>
+              {linkMode ? (linkFrom ? "اختر الثاني…" : "اختر الأول…") : "ربط شخصين"}
+            </Btn>
+          )}
           <Btn C={C} onClick={() => setShowPanel(s => !s)}>{showPanel ? "إخفاء اللوحة" : "إظهار اللوحة"}</Btn>
           <Btn C={C} onClick={exportData}>تصدير</Btn>
-          <Btn C={C} onClick={() => importRef.current?.click()}>استيراد</Btn>
+          {(!cloudLive || isAdmin) && <Btn C={C} onClick={() => importRef.current?.click()}>استيراد</Btn>}
           <input ref={importRef} type="file" accept="application/json" style={{ display: "none" }}
             onChange={e => { importData(e.target.files[0]); e.target.value = ""; }} />
         </div>
       </div>
 
-      {updateAvail && (
+      {cloud === "empty" && isAdmin && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 12, flexWrap: "wrap",
+          padding: "8px 14px", background: "#e8f2ee", borderBottom: "1px solid #bcd8cd",
+          fontSize: 13, color: "#1f5c46", flexShrink: 0, zIndex: 29,
+        }}>
+          قاعدة البيانات السحابية جاهزة لكنها فارغة — ارفع الشجرة الحالية لتصبح مشتركة ومباشرة للجميع.
+          <button onClick={seedCloudFromCurrent} disabled={!photosReady || !!busyMsg} style={{
+            background: photosReady && !busyMsg ? C.gold : "#9db3aa", color: "#fff", border: "none",
+            padding: "5px 14px", borderRadius: 6, cursor: photosReady && !busyMsg ? "pointer" : "wait",
+            fontFamily: "'Tajawal'", fontSize: 13, fontWeight: 600,
+          }}>{busyMsg || (photosReady ? "رفع البيانات إلى السحابة" : "بانتظار تحميل الصور…")}</button>
+        </div>
+      )}
+
+      {updateAvail && !cloudLive && (
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
           padding: "8px 14px", background: "#fdf3dd", borderBottom: "1px solid #ecd9ac",
@@ -856,7 +1216,11 @@ function FamilyTree() {
               </div>
             )}
             <div style={{ display: "flex", borderBottom: `1px solid ${C.border}` }}>
-              {[["view", "الملف"], ["edit", "تحرير"], ["log", `السجل (${log.length})`]].map(([k, lbl]) => (
+              {[
+                ["view", "الملف"], ["edit", "تحرير"],
+                ["log", `السجل (${cloudLive ? revisions.length : log.length})`],
+                ...(cloudLive && isAdmin ? [["admin", `الإدارة${requests.length ? ` (${requests.length})` : ""}`]] : []),
+              ].map(([k, lbl]) => (
                 <button key={k} onClick={() => setTab(k)} style={{
                   flex: 1, padding: "12px 0", background: tab === k ? C.panel2 : "transparent",
                   color: tab === k ? C.gold : C.sub, border: "none", borderBottom: tab === k ? `2px solid ${C.gold}` : "2px solid transparent",
@@ -879,7 +1243,11 @@ function FamilyTree() {
                   <PanelHint C={C} />
                 )
               )}
-              {tab === "edit" && (
+              {tab === "edit" && cloudLive && !isEditor && (
+                <AuthGate C={C} user={user} reqSent={reqSent}
+                  onSignIn={signIn} onRequest={requestAccess} />
+              )}
+              {tab === "edit" && canEdit && (
                 selected ? (
                   <EditPanel C={C} person={selected} photo={photos[selected.id]}
                     people={visPeople} edges={visEdges} familyMode={familyMode}
@@ -913,7 +1281,28 @@ function FamilyTree() {
                   <PanelHint C={C} />
                 )
               )}
-              {tab === "log" && (
+              {tab === "log" && cloudLive && (
+                <div>
+                  {revisions.length === 0 && <div style={{ color: C.sub, fontSize: 14 }}>لا توجد تعديلات بعد.</div>}
+                  {revisions.map(r => (
+                    <div key={r.id} style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+                      <div style={{ fontSize: 14, color: C.parch }}>{r.text}</div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+                        <div style={{ fontSize: 11, color: C.sub }}>
+                          {r.name ? r.name + " · " : ""}{fmtTime(r.ts)}
+                        </div>
+                        {isEditor && (r.before || r.kind === "add") && (
+                          <button onClick={() => revertRevision(r)} style={{
+                            background: "transparent", border: `1px solid ${C.border}`, color: C.sub,
+                            borderRadius: 6, cursor: "pointer", fontSize: 11, fontFamily: "'Tajawal'", padding: "2px 8px",
+                          }}>تراجع</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {tab === "log" && !cloudLive && (
                 <div>
                   {log.length === 0 && <div style={{ color: C.sub, fontSize: 14 }}>لا توجد تعديلات بعد.</div>}
                   {log.map(l => (
@@ -925,6 +1314,10 @@ function FamilyTree() {
                     </div>
                   ))}
                 </div>
+              )}
+              {tab === "admin" && cloudLive && isAdmin && (
+                <AdminPanel C={C} requests={requests} access={access}
+                  onApprove={approveRequest} onReject={rejectRequest} onRemoveEditor={removeEditor} />
               )}
             </div>
           </div>
@@ -997,6 +1390,14 @@ function FamilyTree() {
 
       {showUnlock && <UnlockModal C={C} onTry={tryUnlock} onClose={() => setShowUnlock(false)} />}
 
+      {busyMsg && (
+        <div style={{ position: "absolute", inset: 0, background: "rgba(43,42,37,.5)", zIndex: 90, display: "grid", placeItems: "center" }}>
+          <div style={{ background: "#fff", borderRadius: 12, padding: "20px 34px", fontFamily: "'Amiri',serif", fontSize: 18, color: C.gold }}>
+            {busyMsg}
+          </div>
+        </div>
+      )}
+
       {loading && (
         <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: C.bg, zIndex: 50 }}>
           <div style={{ color: C.gold, fontFamily: "'Amiri',serif", fontSize: 20 }}>جارٍ التحميل…</div>
@@ -1059,6 +1460,7 @@ function ContactLinks({ C, person }) {
   const c = person.contacts || {};
   const links = [
     ["واتساب", waLink(c.whatsapp), "#25D366"],
+    ["البريد", mailLink(c.email), "#8a6d3b"],
     ["لينكدإن", liLink(c.linkedin), "#0A66C2"],
     ["إكس / تويتر", twLink(c.twitter), "#333333"],
   ].filter(([, url]) => url);
@@ -1128,9 +1530,9 @@ function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdi
       {familyMode ? (
         <div style={{ fontSize: 14, lineHeight: 1.9 }}>
           {person.dob
-            ? <>تاريخ الميلاد: {person.dob}{age != null && !person.deceased ? ` · العمر ${age} سنة تقريبًا` : ""}</>
+            ? <>تاريخ الميلاد: {fmtDate(person.dob)}{age != null && !person.deceased ? ` · العمر ${age} سنة تقريبًا` : ""}</>
             : <span style={{ color: C.sub, fontSize: 13 }}>لم يُسجل تاريخ الميلاد.</span>}
-          {person.deceased && person.dod && <div>سنة الوفاة: {person.dod}{age != null ? ` · عن عمر ${age} سنة تقريبًا` : ""}</div>}
+          {person.deceased && person.dod && <div>سنة الوفاة: {yearOf(person.dod)}{age != null ? ` · عن عمر ${age} سنة تقريبًا` : ""}</div>}
         </div>
       ) : (
         <LockedHint C={C} onUnlock={onUnlock} text="تواريخ الميلاد تظهر في الوضع العائلي فقط." />
@@ -1338,6 +1740,151 @@ function UnlockModal({ C, onTry, onClose }) {
   );
 }
 
+function AuthGate({ C, user, reqSent, onSignIn, onRequest }) {
+  const box = {
+    background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 10,
+    padding: "18px 16px", textAlign: "center", fontSize: 14, lineHeight: 2, color: C.parch,
+  };
+  const btn = {
+    background: C.gold, color: "#fff", border: "none", padding: "9px 20px", borderRadius: 8,
+    cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14, fontWeight: 700, marginTop: 8,
+  };
+  if (!user) return (
+    <div style={box}>
+      الشجرة الآن مشتركة ومباشرة ☁<br />
+      للتحرير، سجّل الدخول بحساب Google ثم اطلب صلاحية التحرير من المشرف.
+      <div><button style={btn} onClick={onSignIn}>تسجيل الدخول بحساب Google</button></div>
+    </div>
+  );
+  if (reqSent) return (
+    <div style={box}>
+      ✅ تم إرسال طلبك.<br />
+      بانتظار موافقة المشرف — ستتمكن من التحرير فور قبول الطلب.
+    </div>
+  );
+  return (
+    <div style={box}>
+      مرحبًا {(user.displayName || "").split(" ")[0]} 👋<br />
+      حسابك لا يملك صلاحية التحرير بعد. اطلبها الآن وسيصل طلبك إلى المشرف.
+      <div><button style={btn} onClick={onRequest}>طلب صلاحية التحرير</button></div>
+    </div>
+  );
+}
+
+function AdminPanel({ C, requests, access, onApprove, onReject, onRemoveEditor }) {
+  const sect = { fontSize: 13, color: C.gold, margin: "4px 0 10px", fontWeight: 700 };
+  const row = {
+    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+    padding: "8px 10px", background: C.panel2, borderRadius: 7, marginBottom: 6, fontSize: 13,
+  };
+  const editors = access?.editors || [];
+  return (
+    <div>
+      <div style={sect}>طلبات التحرير ({requests.length})</div>
+      {requests.length === 0 && <div style={{ color: C.sub, fontSize: 13, marginBottom: 14 }}>لا توجد طلبات معلقة.</div>}
+      {requests.map(r => (
+        <div key={r.uid} style={row}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name || "بدون اسم"}</div>
+            <div style={{ color: C.sub, fontSize: 11, direction: "ltr", textAlign: "right" }}>{r.email}</div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button onClick={() => onApprove(r)} style={{
+              background: C.gold, color: "#fff", border: "none", borderRadius: 6,
+              padding: "5px 12px", cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 12, fontWeight: 700,
+            }}>قبول</button>
+            <button onClick={() => onReject(r)} style={{
+              background: "transparent", color: "#c0392b", border: "1px solid #e3b4ad", borderRadius: 6,
+              padding: "5px 10px", cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 12,
+            }}>رفض</button>
+          </div>
+        </div>
+      ))}
+
+      <div style={{ ...sect, marginTop: 18 }}>المحررون المعتمدون ({editors.length})</div>
+      {editors.length === 0 && <div style={{ color: C.sub, fontSize: 13 }}>لا يوجد محررون بعد — اقبل الطلبات أعلاه.</div>}
+      {editors.map(em => (
+        <div key={em} style={row}>
+          <span style={{ direction: "ltr", overflow: "hidden", textOverflow: "ellipsis" }}>{em}</span>
+          <button onClick={() => onRemoveEditor(em)} style={{
+            background: "transparent", color: "#c0392b", border: "none", cursor: "pointer",
+            fontFamily: "'Tajawal'", fontSize: 12, flexShrink: 0,
+          }}>سحب الصلاحية</button>
+        </div>
+      ))}
+
+      <div style={{ marginTop: 20, fontSize: 12, color: C.sub, lineHeight: 1.9 }}>
+        💡 زر "تصدير" في الأعلى يحفظ نسخة احتياطية كاملة من الشجرة والصور.
+        احفظ نسخة دوريًا؛ ويمكن استعادتها عبر "استيراد".
+      </div>
+    </div>
+  );
+}
+
+// dropdown date picker; stores "YYYY", "YYYY-MM" or "YYYY-MM-DD" (month/day optional)
+function DateSelect({ C, value, onChange, yearOnly }) {
+  const m = String(value || "").match(/^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?/);
+  const y = m ? +m[1] : "", mo = m && m[2] ? +m[2] : "", d = m && m[3] ? +m[3] : "";
+  const nowY = new Date().getFullYear();
+  const years = []; for (let i = nowY; i >= 1850; i--) years.push(i);
+  const daysIn = (yy, mm) => new Date(yy || 2000, mm, 0).getDate();
+  const emit = (ny, nm, nd) => {
+    if (!ny) return onChange("");
+    let s = String(ny);
+    if (nm) { s += "-" + String(nm).padStart(2, "0"); if (nd) s += "-" + String(nd).padStart(2, "0"); }
+    onChange(s);
+  };
+  const sel = {
+    flex: 1, minWidth: 0, padding: "8px 6px", borderRadius: 7, border: `1px solid ${C.border}`,
+    background: C.panel2, color: C.parch, fontFamily: "'Tajawal'", fontSize: 13.5, outline: "none",
+  };
+  return (
+    <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+      <select value={y} style={sel} onChange={e => {
+        const ny = +e.target.value || "";
+        emit(ny, ny ? mo : "", ny && mo ? Math.min(d || 0, daysIn(ny, mo)) || "" : "");
+      }}>
+        <option value="">السنة</option>
+        {years.map(yy => <option key={yy} value={yy}>{yy}</option>)}
+      </select>
+      {!yearOnly && (
+        <select value={mo} style={sel} disabled={!y} onChange={e => {
+          const nm = +e.target.value || "";
+          emit(y, nm, nm ? Math.min(d || 0, daysIn(y, nm)) || "" : "");
+        }}>
+          <option value="">الشهر</option>
+          {AR_MONTHS.map((nm, i) => <option key={i} value={i + 1}>{nm}</option>)}
+        </select>
+      )}
+      {!yearOnly && (
+        <select value={d} style={{ ...sel, maxWidth: 76 }} disabled={!mo} onChange={e => emit(y, mo, +e.target.value || "")}>
+          <option value="">اليوم</option>
+          {mo ? Array.from({ length: daysIn(y, mo) }, (_, i) => i + 1).map(dd =>
+            <option key={dd} value={dd}>{dd}</option>) : null}
+        </select>
+      )}
+    </div>
+  );
+}
+
+// input restricted + validated per field type, with an inline error hint
+function VInput({ C, label, value, onChange, field, placeholder, inputMode }) {
+  const err = fieldValidators[field] ? fieldValidators[field](value || "") : "";
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ fontSize: 12, color: C.sub, marginBottom: 5, display: "block" }}>{label}</label>
+      <input value={value || ""} dir="ltr" inputMode={inputMode} placeholder={placeholder}
+        onChange={e => onChange(fieldFilters[field] ? fieldFilters[field](e.target.value) : e.target.value)}
+        style={{
+          width: "100%", boxSizing: "border-box", padding: "9px 11px", borderRadius: 7,
+          border: `1px solid ${err ? "#c0392b" : C.border}`, background: C.panel2, color: C.parch,
+          fontFamily: "'Tajawal'", fontSize: 14, outline: "none",
+        }} />
+      {err && <div style={{ fontSize: 11.5, color: "#c0392b", marginTop: 4 }}>{err}</div>}
+    </div>
+  );
+}
+
 function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onName, onNameCommit,
   onNickname, onGender, onDob, onDod, onElderly, onContact, onPoc, onNote, onDeceased,
   onUpload, onRemovePhoto, onAddChild, onAddParent, onAddSpouse, onDelete, onRemoveEdge, onSelect, onUnlock }) {
@@ -1400,22 +1947,24 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
       {familyMode ? (
         <div>
           <div style={sect}>الميلاد والوفاة</div>
-          <label style={label}>تاريخ الميلاد (سنة فقط أو تاريخ كامل: 1965 أو 1965-04-12)</label>
-          <input value={person.dob || ""} onChange={e => onDob(e.target.value)} style={inp} dir="ltr" />
+          <label style={label}>تاريخ الميلاد (السنة تكفي، الشهر واليوم اختياريان)</label>
+          <DateSelect C={C} value={person.dob} onChange={onDob} />
           {person.deceased && (
             <div>
               <label style={label}>سنة الوفاة</label>
-              <input value={person.dod || ""} onChange={e => onDod(e.target.value)} style={inp} dir="ltr" />
+              <DateSelect C={C} value={person.dod} onChange={onDod} yearOnly />
             </div>
           )}
 
           <div style={sect}>بيانات التواصل</div>
-          <label style={label}>واتساب (رقم دولي مثل +9665xxxxxxxx)</label>
-          <input value={contacts.whatsapp || ""} onChange={e => onContact("whatsapp", e.target.value)} style={inp} dir="ltr" />
-          <label style={label}>لينكدإن (رابط أو اسم مستخدم)</label>
-          <input value={contacts.linkedin || ""} onChange={e => onContact("linkedin", e.target.value)} style={inp} dir="ltr" />
-          <label style={label}>إكس / تويتر (اسم المستخدم)</label>
-          <input value={contacts.twitter || ""} onChange={e => onContact("twitter", e.target.value)} style={inp} dir="ltr" />
+          <VInput C={C} field="whatsapp" inputMode="tel" label="واتساب (رقم دولي)"
+            placeholder="+9665xxxxxxxx" value={contacts.whatsapp} onChange={v => onContact("whatsapp", v)} />
+          <VInput C={C} field="email" inputMode="email" label="البريد الإلكتروني"
+            placeholder="name@example.com" value={contacts.email} onChange={v => onContact("email", v)} />
+          <VInput C={C} field="linkedin" label="لينكدإن (رابط أو اسم مستخدم)"
+            placeholder="linkedin.com/in/…" value={contacts.linkedin} onChange={v => onContact("linkedin", v)} />
+          <VInput C={C} field="twitter" label="إكس / تويتر (اسم المستخدم)"
+            placeholder="@username" value={contacts.twitter} onChange={v => onContact("twitter", v)} />
 
           <div style={sect}>جهة التواصل (للمتوفى أو كبير السن)</div>
           <PocPicker C={C} people={people} value={person.poc} onChange={onPoc} />
