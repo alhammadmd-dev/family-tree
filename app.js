@@ -2472,19 +2472,41 @@ function FamilyTree() {
       background: C.panel,
       border: `1px solid ${C.border}`,
       borderRadius: 8,
-      maxHeight: 240,
+      maxHeight: 320,
       overflowY: "auto"
     }
-  }, searchHits.slice(0, 30).map(p => /*#__PURE__*/React.createElement("div", {
-    key: p.id,
-    onClick: () => focusPerson(p),
-    style: {
-      padding: "8px 12px",
-      cursor: "pointer",
-      fontSize: 14,
-      borderBottom: `1px solid ${C.border}`
+  }, searchHits.slice(0, 30).map(p => {
+    const anc = [];
+    let c = p.id,
+      n = 0;
+    while (primParent[c] && n++ < 4) {
+      c = primParent[c];
+      if (pmap[c]) anc.push(pmap[c].name);
     }
-  }, p.name, p.nickname ? ` (${p.nickname})` : "", p.deceased ? ` · ${mercy(p)}` : ""))))), showPanel && /*#__PURE__*/React.createElement("div", {
+    const husband = !anc.length && spousesOf(p.id).map(sp => pmap[sp]?.name).filter(Boolean)[0];
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      onClick: () => focusPerson(p),
+      style: {
+        padding: "7px 12px",
+        cursor: "pointer",
+        borderBottom: `1px solid ${C.border}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: "'Amiri',serif",
+        fontWeight: 700,
+        fontSize: 14.5,
+        color: C.parch
+      }
+    }, p.name, p.nickname ? ` (${p.nickname})` : "", p.deceased ? ` · ${mercy(p)}` : ""), (anc.length > 0 || husband) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.sub,
+        marginTop: 1
+      }
+    }, anc.length > 0 ? `${p.gender === "f" ? "بنت" : "بن"} ${anc.join(" بن ")}${primParent[c] ? "…" : ""}` : `زوجة ${husband}`));
+  })))), showPanel && /*#__PURE__*/React.createElement("div", {
     style: isMobile ? {
       position: "absolute",
       left: 0,
