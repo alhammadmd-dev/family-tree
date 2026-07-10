@@ -3990,9 +3990,9 @@ function EditPanel({
     onClick: onRemovePhoto
   }, "حذف الصورة"))), /*#__PURE__*/React.createElement("label", {
     style: label
-  }, "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"), /*#__PURE__*/React.createElement("input", {
+  }, person.gender === "f" ? "الاسم (يمكن كتابة اسم العائلة، مثل «نورة العتيبي»)" : "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"), /*#__PURE__*/React.createElement("input", {
     value: person.name,
-    onChange: e => onName(e.target.value.replace(/\s+/g, "")),
+    onChange: e => onName(person.gender === "f" ? e.target.value : e.target.value.replace(/\s+/g, "")),
     onBlur: e => onNameCommit(e.target.value),
     style: inp
   }), /*#__PURE__*/React.createElement("label", {

@@ -2284,8 +2284,13 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
         </div>
       </div>
 
-      <label style={label}>الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)</label>
-      <input value={person.name} onChange={e => onName(e.target.value.replace(/\s+/g, ""))}
+      <label style={label}>
+        {person.gender === "f"
+          ? "الاسم (يمكن كتابة اسم العائلة، مثل «نورة العتيبي»)"
+          : "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"}
+      </label>
+      <input value={person.name}
+        onChange={e => onName(person.gender === "f" ? e.target.value : e.target.value.replace(/\s+/g, ""))}
         onBlur={e => onNameCommit(e.target.value)} style={inp} />
 
       <label style={label}>الكنية / اللقب (أبو فلان…)</label>
