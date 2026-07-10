@@ -210,19 +210,16 @@ function FamilyTree() {
   const [updateAvail, setUpdateAvail] = useState(false);
   const [isMobile, setIsMobile] = useState(typeof window !== "undefined" && window.innerWidth < 700);
 
-  // cloud / auth state
+  // cloud / auth state — open editing model: any signed-in Google account can edit
   const [cloud, setCloud] = useState(FB ? "connecting" : "off"); // connecting | live | empty | off
   const [user, setUser] = useState(null);
-  const [access, setAccess] = useState(null);         // {admins, editors}
-  const [requests, setRequests] = useState([]);       // pending access requests (admin only)
   const [revisions, setRevisions] = useState([]);     // cloud edit history
   const [busyMsg, setBusyMsg] = useState("");
   const [photosReady, setPhotosReady] = useState(false);
-  const [reqSent, setReqSent] = useState(false);
 
   const cloudLive = cloud === "live";
-  const isAdmin = !!user && (user.email === ADMIN_EMAIL || (access?.admins || []).includes(user.email));
-  const isEditor = isAdmin || (!!user && (access?.editors || []).includes(user.email));
+  const isAdmin = !!user && user.email === ADMIN_EMAIL;
+  const isEditor = !!user;
   const canEdit = !cloudLive || isEditor;
 
   useEffect(() => {
@@ -295,21 +292,8 @@ function FamilyTree() {
     return un;
   }, [cloudLive]);
 
-  // ---------- Cloud: auth / access / requests / history ----------
+  // ---------- Cloud: auth / history ----------
   useEffect(() => { if (FB) return FB.auth.onAuthStateChanged(u => setUser(u)); }, []);
-  useEffect(() => {
-    if (!FB || !user) { setAccess(null); return; }
-    setReqSent(localStorage.getItem("ft:req:" + user.uid) === "1");
-    return FB.db.doc("config/access").onSnapshot(
-      d => setAccess(d.exists ? d.data() : null), () => {});
-  }, [user]);
-  useEffect(() => {
-    if (!FB || !isAdmin || cloud === "off" || cloud === "connecting") { setRequests([]); return; }
-    return FB.db.collection("requests").onSnapshot(s => {
-      const a = []; s.forEach(d => a.push({ uid: d.id, ...d.data() }));
-      a.sort((x, y) => (y.ts || 0) - (x.ts || 0)); setRequests(a);
-    }, () => {});
-  }, [user, access, cloud]);
   useEffect(() => {
     if (!FB || !cloudLive) return;
     return FB.db.collection("revisions").orderBy("ts", "desc").limit(100)
@@ -510,27 +494,6 @@ function FamilyTree() {
     catch (e) { if (e?.code !== "auth/popup-closed-by-user") window.alert("تعذر تسجيل الدخول: " + (e.message || "")); }
   };
   const signOut = () => FB.auth.signOut();
-  const requestAccess = async () => {
-    try {
-      await FB.db.doc("requests/" + user.uid).set({ email: user.email, name: user.displayName || "", ts: Date.now() });
-      localStorage.setItem("ft:req:" + user.uid, "1"); setReqSent(true);
-    } catch (e) { window.alert("تعذر إرسال الطلب: " + (e.message || "")); }
-  };
-  const approveRequest = async (r) => {
-    try {
-      await FB.db.doc("config/access").set({
-        admins: FV().arrayUnion(ADMIN_EMAIL), editors: FV().arrayUnion(r.email),
-      }, { merge: true });
-      await FB.db.doc("requests/" + r.uid).delete();
-      cloudRevision(`منح صلاحية التحرير لـ ${r.name || r.email}`);
-    } catch (e) { window.alert("تعذر القبول: " + (e.message || "")); }
-  };
-  const rejectRequest = (r) => FB.db.doc("requests/" + r.uid).delete().catch(() => {});
-  const removeEditor = async (email) => {
-    if (!window.confirm(`سحب صلاحية التحرير من ${email}؟`)) return;
-    await FB.db.doc("config/access").set({ editors: FV().arrayRemove(email) }, { merge: true }).catch(() => {});
-    cloudRevision(`سحب صلاحية التحرير من ${email}`);
-  };
 
   // ====================== Seed / restore the cloud database ======================
   const seedToCloud = async (p, e, ph) => {
@@ -545,7 +508,6 @@ function FamilyTree() {
       for (let i = 0; i < EDGE_CHUNKS; i++) batch.set(FB.db.doc("tree/edges-" + i), ec[i] || {});
       for (let i = 0; i < PHOTO_CHUNKS; i++) batch.set(FB.db.doc("photos/c" + i), phc[i] || {});
       await batch.commit();
-      await FB.db.doc("config/access").set({ admins: FV().arrayUnion(ADMIN_EMAIL) }, { merge: true });
       // meta last: listeners flip to "live" only once all data is in place
       await FB.db.doc("tree/meta").set({ seeded: true, ts: Date.now(), version: SEED.version || 2 });
       FB.db.collection("revisions").add({
@@ -1219,7 +1181,6 @@ function FamilyTree() {
               {[
                 ["view", "الملف"], ["edit", "تحرير"],
                 ["log", `السجل (${cloudLive ? revisions.length : log.length})`],
-                ...(cloudLive && isAdmin ? [["admin", `الإدارة${requests.length ? ` (${requests.length})` : ""}`]] : []),
               ].map(([k, lbl]) => (
                 <button key={k} onClick={() => setTab(k)} style={{
                   flex: 1, padding: "12px 0", background: tab === k ? C.panel2 : "transparent",
@@ -1244,8 +1205,7 @@ function FamilyTree() {
                 )
               )}
               {tab === "edit" && cloudLive && !isEditor && (
-                <AuthGate C={C} user={user} reqSent={reqSent}
-                  onSignIn={signIn} onRequest={requestAccess} />
+                <AuthGate C={C} onSignIn={signIn} />
               )}
               {tab === "edit" && canEdit && (
                 selected ? (
@@ -1314,10 +1274,6 @@ function FamilyTree() {
                     </div>
                   ))}
                 </div>
-              )}
-              {tab === "admin" && cloudLive && isAdmin && (
-                <AdminPanel C={C} requests={requests} access={access}
-                  onApprove={approveRequest} onReject={rejectRequest} onRemoveEditor={removeEditor} />
               )}
             </div>
           </div>
@@ -1740,82 +1696,19 @@ function UnlockModal({ C, onTry, onClose }) {
   );
 }
 
-function AuthGate({ C, user, reqSent, onSignIn, onRequest }) {
-  const box = {
-    background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 10,
-    padding: "18px 16px", textAlign: "center", fontSize: 14, lineHeight: 2, color: C.parch,
-  };
-  const btn = {
-    background: C.gold, color: "#fff", border: "none", padding: "9px 20px", borderRadius: 8,
-    cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14, fontWeight: 700, marginTop: 8,
-  };
-  if (!user) return (
-    <div style={box}>
+function AuthGate({ C, onSignIn }) {
+  return (
+    <div style={{
+      background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 10,
+      padding: "18px 16px", textAlign: "center", fontSize: 14, lineHeight: 2, color: C.parch,
+    }}>
       الشجرة الآن مشتركة ومباشرة ☁<br />
-      للتحرير، سجّل الدخول بحساب Google ثم اطلب صلاحية التحرير من المشرف.
-      <div><button style={btn} onClick={onSignIn}>تسجيل الدخول بحساب Google</button></div>
-    </div>
-  );
-  if (reqSent) return (
-    <div style={box}>
-      ✅ تم إرسال طلبك.<br />
-      بانتظار موافقة المشرف — ستتمكن من التحرير فور قبول الطلب.
-    </div>
-  );
-  return (
-    <div style={box}>
-      مرحبًا {(user.displayName || "").split(" ")[0]} 👋<br />
-      حسابك لا يملك صلاحية التحرير بعد. اطلبها الآن وسيصل طلبك إلى المشرف.
-      <div><button style={btn} onClick={onRequest}>طلب صلاحية التحرير</button></div>
-    </div>
-  );
-}
-
-function AdminPanel({ C, requests, access, onApprove, onReject, onRemoveEditor }) {
-  const sect = { fontSize: 13, color: C.gold, margin: "4px 0 10px", fontWeight: 700 };
-  const row = {
-    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-    padding: "8px 10px", background: C.panel2, borderRadius: 7, marginBottom: 6, fontSize: 13,
-  };
-  const editors = access?.editors || [];
-  return (
-    <div>
-      <div style={sect}>طلبات التحرير ({requests.length})</div>
-      {requests.length === 0 && <div style={{ color: C.sub, fontSize: 13, marginBottom: 14 }}>لا توجد طلبات معلقة.</div>}
-      {requests.map(r => (
-        <div key={r.uid} style={row}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name || "بدون اسم"}</div>
-            <div style={{ color: C.sub, fontSize: 11, direction: "ltr", textAlign: "right" }}>{r.email}</div>
-          </div>
-          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            <button onClick={() => onApprove(r)} style={{
-              background: C.gold, color: "#fff", border: "none", borderRadius: 6,
-              padding: "5px 12px", cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 12, fontWeight: 700,
-            }}>قبول</button>
-            <button onClick={() => onReject(r)} style={{
-              background: "transparent", color: "#c0392b", border: "1px solid #e3b4ad", borderRadius: 6,
-              padding: "5px 10px", cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 12,
-            }}>رفض</button>
-          </div>
-        </div>
-      ))}
-
-      <div style={{ ...sect, marginTop: 18 }}>المحررون المعتمدون ({editors.length})</div>
-      {editors.length === 0 && <div style={{ color: C.sub, fontSize: 13 }}>لا يوجد محررون بعد — اقبل الطلبات أعلاه.</div>}
-      {editors.map(em => (
-        <div key={em} style={row}>
-          <span style={{ direction: "ltr", overflow: "hidden", textOverflow: "ellipsis" }}>{em}</span>
-          <button onClick={() => onRemoveEditor(em)} style={{
-            background: "transparent", color: "#c0392b", border: "none", cursor: "pointer",
-            fontFamily: "'Tajawal'", fontSize: 12, flexShrink: 0,
-          }}>سحب الصلاحية</button>
-        </div>
-      ))}
-
-      <div style={{ marginTop: 20, fontSize: 12, color: C.sub, lineHeight: 1.9 }}>
-        💡 زر "تصدير" في الأعلى يحفظ نسخة احتياطية كاملة من الشجرة والصور.
-        احفظ نسخة دوريًا؛ ويمكن استعادتها عبر "استيراد".
+      للتحرير، سجّل الدخول بحساب Google — تعديلاتك تظهر للجميع باسمك ويمكن التراجع عنها من السجل.
+      <div>
+        <button onClick={onSignIn} style={{
+          background: C.gold, color: "#fff", border: "none", padding: "9px 20px", borderRadius: 8,
+          cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 14, fontWeight: 700, marginTop: 8,
+        }}>تسجيل الدخول بحساب Google</button>
       </div>
     </div>
   );
