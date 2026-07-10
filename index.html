@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="robots" content="noindex, nofollow"/>
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>شجرة العائلة - الوزرة</title>
 <style>html,body,#root{margin:0;padding:0;height:100%;background:#f6f4ee;font-family:'Tajawal',sans-serif}
 #boot{position:fixed;inset:0;display:grid;place-items:center;color:#2f7d62;font-size:20px;font-family:serif}</style>
@@ -142,6 +142,13 @@ function FamilyTree() {
   const [familyMode, setFamilyMode] = useState(false);
   const [showUnlock, setShowUnlock] = useState(false);
   const [updateAvail, setUpdateAvail] = useState(false);
+  const [isMobile, setIsMobile] = useState(typeof window !== "undefined" && window.innerWidth < 700);
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 700);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const [view, setView] = useState({ s: 1, tx: 0, ty: 0 });
   const loadedRef = useRef(false);
@@ -200,7 +207,7 @@ function FamilyTree() {
       }
       setLog(logArr);
 
-      // photos: seeded from embedded data, overlaid by any user uploads in storage
+      // photos: user uploads first (from storage); the seed photo pack loads lazily below
       const ph = { ...SEED.photos };
       const keys = await store.list("ft:photo:");
       for (const k of keys) {
@@ -216,12 +223,59 @@ function FamilyTree() {
         const n0 = p[0] || { x: 0, y: 120 };
         const s0 = vw < 700 ? 1.1 : 0.62;
         setView({ s: s0, tx: vw / 2 - n0.x * s0, ty: Math.max(24, vh * 0.16) - n0.y * s0 });
+
+        // deep link: #p=<id> opens focused on that person (females only in family mode)
+        const m = window.location.hash.match(/^#p=(.+)$/);
+        const target = m && p.find(x => x.id === decodeURIComponent(m[1]));
+        if (target && (target.gender !== "f" || fm === FAMILY_CODE_HASH)) {
+          setView({ s: 1, tx: vw / 2 - target.x, ty: vh / 2 - target.y });
+          setSelectedId(target.id); setTab("view"); setShowPanel(true);
+        }
       }
 
       setLoading(false);
       loadedRef.current = true;
     })();
   }, []);
+
+  // ---------- Seed photo pack (large file, loaded after first paint) ----------
+  useEffect(() => {
+    let alive = true;
+    fetch("./family-tree-photos.json")
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!alive || !d || !d.photos) return;
+        // seed photos sit under any photos the user uploaded on this device
+        setPhotos(prev => ({ ...d.photos, ...prev }));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  // ---------- Keep #p=<id> in the URL for shareable links ----------
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    const url = selectedId ? "#p=" + encodeURIComponent(selectedId) : window.location.pathname + window.location.search;
+    try { history.replaceState(null, "", url); } catch {}
+  }, [selectedId]);
+
+  // ---------- React to hash navigation while the app is open ----------
+  useEffect(() => {
+    const onHash = () => {
+      const m = window.location.hash.match(/^#p=(.+)$/);
+      if (!m) return;
+      const id = decodeURIComponent(m[1]);
+      if (id === selectedId) return;
+      const t = people.find(x => x.id === id);
+      if (!t || (t.gender === "f" && !familyMode)) return;
+      const r = canvasRef.current?.getBoundingClientRect();
+      const w = r ? r.width : 900, h = r ? r.height : 600;
+      setView({ s: 1, tx: w / 2 - t.x, ty: h / 2 - t.y });
+      setSelectedId(t.id); setTab("view"); setShowPanel(true);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [people, familyMode, selectedId]);
 
   // ---------- Persist tree (debounced) ----------
   useEffect(() => {
@@ -484,6 +538,15 @@ function FamilyTree() {
     ? visPeople.filter(p => normAr(p.name).includes(q) || normAr(p.nickname).includes(q))
     : [];
 
+  // virtualization: only nodes/connectors near the viewport are rendered
+  const cRect = canvasRef.current?.getBoundingClientRect();
+  const vw = cRect ? cRect.width : 1200, vh = cRect ? cRect.height : 800;
+  const MARGIN = 600;
+  const wx0 = (-view.tx) / view.s - MARGIN, wx1 = (vw - view.tx) / view.s + MARGIN;
+  const wy0 = (-view.ty) / view.s - MARGIN, wy1 = (vh - view.ty) / view.s + MARGIN;
+  const inWorld = (x, y) => x >= wx0 && x <= wx1 && y >= wy0 && y <= wy1;
+  const drawnPeople = visPeople.filter(p => inWorld(p.x, p.y));
+
   const C = {
     bg: "#f6f4ee", panel: "#ffffff", panel2: "#f1ede4",
     gold: "#2f7d62", goldSoft: "#3f8f73", parch: "#2b2a25",
@@ -623,6 +686,7 @@ function FamilyTree() {
                 visEdges.filter(e => e.type === "spouse").forEach(e => {
                   const a = byId[e.from], b = byId[e.to];
                   if (!a || !b) return;
+                  if (!inWorld(a.x, a.y) && !inWorld(b.x, b.y)) return;
                   const [l, r] = a.x <= b.x ? [a, b] : [b, a];
                   let x1 = l.x + NODE_W / 2, x2 = r.x - NODE_W / 2;
                   if (x2 <= x1) { x1 = l.x; x2 = r.x; }
@@ -634,6 +698,10 @@ function FamilyTree() {
                   const par = byId[pid]; if (!par) return;
                   const cs = kids[pid].map(id => byId[id]).filter(Boolean);
                   if (!cs.length) return;
+                  // cull connector groups fully outside the viewport
+                  const gx0 = Math.min(par.x, ...cs.map(c => c.x)), gx1 = Math.max(par.x, ...cs.map(c => c.x));
+                  const gy0 = Math.min(par.y, ...cs.map(c => c.y)), gy1 = Math.max(par.y, ...cs.map(c => c.y));
+                  if (gx1 < wx0 || gx0 > wx1 || gy1 < wy0 || gy0 > wy1) return;
                   const pBot = par.y + NODE_H / 2;
                   const cTop = cs[0].y - NODE_H / 2;
                   const busY = pBot + (cTop - pBot) * 0.5;
@@ -650,8 +718,8 @@ function FamilyTree() {
               })()}
             </svg>
 
-            {/* nodes */}
-            {visPeople.map(p => {
+            {/* nodes (virtualized: only those near the viewport) */}
+            {drawnPeople.map(p => {
               const isSel = p.id === selectedId;
               const isLinkFrom = linkFrom === p.id;
               const isF = p.gender === "f";
@@ -728,6 +796,12 @@ function FamilyTree() {
             </div>
           )}
 
+          {/* minimap */}
+          {!loading && visPeople.length > 0 && !(isMobile && showPanel) && (
+            <Minimap C={C} people={visPeople} view={view} vw={vw} vh={vh}
+              onJump={(wx, wy) => setView(v => ({ ...v, tx: vw / 2 - wx * v.s, ty: vh / 2 - wy * v.s }))} />
+          )}
+
           {/* zoom controls */}
           <div style={{ position: "absolute", bottom: 16, left: 16, display: "flex", flexDirection: "column", gap: 6 }}>
             <RoundBtn C={C} onClick={() => zoom(1.2)}>+</RoundBtn>
@@ -764,12 +838,23 @@ function FamilyTree() {
           </div>
         </div>
 
-        {/* Side panel */}
+        {/* Side panel (desktop) / bottom sheet (mobile) */}
         {showPanel && (
-          <div style={{
+          <div style={isMobile ? {
+            position: "absolute", left: 0, right: 0, bottom: 0, height: "58%",
+            background: C.panel, borderTop: `1px solid ${C.border}`, borderRadius: "16px 16px 0 0",
+            display: "flex", flexDirection: "column", zIndex: 40,
+            boxShadow: "0 -8px 30px rgba(0,0,0,.18)",
+          } : {
             width: 320, flexShrink: 0, background: C.panel, borderRight: `1px solid ${C.border}`,
             display: "flex", flexDirection: "column", zIndex: 20,
           }}>
+            {isMobile && (
+              <div onClick={() => setShowPanel(false)}
+                style={{ display: "grid", placeItems: "center", padding: "9px 0 4px", cursor: "pointer", flexShrink: 0 }}>
+                <div style={{ width: 44, height: 5, borderRadius: 3, background: C.border }} />
+              </div>
+            )}
             <div style={{ display: "flex", borderBottom: `1px solid ${C.border}` }}>
               {[["view", "الملف"], ["edit", "تحرير"], ["log", `السجل (${log.length})`]].map(([k, lbl]) => (
                 <button key={k} onClick={() => setTab(k)} style={{
@@ -1094,7 +1179,70 @@ function ProfilePanel({ C, person, photo, people, pmap, edges, familyMode, onEdi
         }}>تحرير البيانات</button>
         <Btn C={C} onClick={onRadial}>عرض دائري</Btn>
       </div>
+      <ShareButton C={C} person={person} />
     </div>
+  );
+}
+
+function ShareButton({ C, person }) {
+  const [copied, setCopied] = useState(false);
+  const share = async () => {
+    const url = window.location.origin + window.location.pathname + "#p=" + encodeURIComponent(person.id);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    } catch { window.prompt("انسخ الرابط:", url); }
+  };
+  return (
+    <button onClick={share} style={{
+      width: "100%", marginTop: 8, padding: "9px", borderRadius: 7,
+      border: `1px solid ${C.border}`, background: "transparent", color: copied ? C.gold : C.sub,
+      cursor: "pointer", fontFamily: "'Tajawal'", fontSize: 13, fontWeight: 600,
+    }}>{copied ? "✓ تم نسخ الرابط" : "🔗 نسخ رابط هذا الشخص"}</button>
+  );
+}
+
+function Minimap({ C, people, view, vw, vh, onJump }) {
+  const ref = useRef(null);
+  const boundsRef = useRef(null);
+  const MW = 220, MH = 110;
+
+  useEffect(() => {
+    const cv = ref.current; if (!cv || !people.length) return;
+    const xs = people.map(p => p.x), ys = people.map(p => p.y);
+    const minX = Math.min(...xs) - 800, maxX = Math.max(...xs) + 800;
+    const minY = Math.min(...ys) - 400, maxY = Math.max(...ys) + 400;
+    const sx = MW / (maxX - minX), sy = MH / (maxY - minY);
+    boundsRef.current = { minX, minY, sx, sy };
+    const ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, MW, MH);
+    for (const p of people) {
+      ctx.fillStyle = p.gender === "f" ? "#b06a84" : "#2f7d62";
+      ctx.fillRect((p.x - minX) * sx, (p.y - minY) * sy, 1.6, 1.6);
+    }
+    const rx = ((-view.tx) / view.s - minX) * sx, ry = ((-view.ty) / view.s - minY) * sy;
+    const rw = Math.max((vw / view.s) * sx, 6), rh = Math.max((vh / view.s) * sy, 6);
+    ctx.strokeStyle = "#e0a23a"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(rx, ry, rw, rh);
+  }, [people, view, vw, vh]);
+
+  const jump = (e) => {
+    const b = boundsRef.current; if (!b) return;
+    const r = ref.current.getBoundingClientRect();
+    const px = (e.clientX - r.left) * (MW / r.width);
+    const py = (e.clientY - r.top) * (MH / r.height);
+    onJump(px / b.sx + b.minX, py / b.sy + b.minY);
+  };
+
+  return (
+    <canvas ref={ref} width={MW} height={MH}
+      onPointerDown={(e) => { e.stopPropagation(); jump(e); }}
+      onPointerMove={(e) => { if (e.buttons === 1) { e.stopPropagation(); jump(e); } }}
+      style={{
+        position: "absolute", bottom: 16, right: 14, width: MW, height: MH,
+        background: "rgba(255,255,255,.93)", border: `1px solid ${C.border}`, borderRadius: 10,
+        cursor: "crosshair", boxShadow: "0 3px 10px rgba(0,0,0,.10)", touchAction: "none",
+      }} />
   );
 }
 
