@@ -657,7 +657,7 @@ function FamilyTree() {
     const c = centerWorld();
     const np = {
       id: uid(),
-      name: preset.name || "اسم جديد",
+      name: preset.name || "جديد",
       x: preset.x ?? c.x, y: preset.y ?? c.y,
       note: "", deceased: false,
       ...(preset.gender ? { gender: preset.gender } : {}),
@@ -755,7 +755,7 @@ function FamilyTree() {
     const cy = parent.y + 250;
     const child = addPerson({
       x: freeX(sibs.length ? Math.max(...sibs.map(sb => sb.x)) + NODE_W + 30 : parent.x, cy), y: cy,
-      name: gender === "f" ? "بنت جديدة" : "ابن جديد",
+      name: gender === "f" ? "بنت" : "ابن",
       gender, g: parent.g != null ? parent.g + 1 : undefined,
     });
     const edge = { id: uid(), from: parentId, to: child.id };
@@ -1462,7 +1462,7 @@ function FamilyTree() {
                 <div style={{ color: C.sub, fontSize: 14, marginBottom: 16 }}>
                   أضف الجد الأكبر ثم ابنِ الفروع منه
                 </div>
-                <button onClick={() => addPerson({ name: "الجد الأكبر" })} style={{
+                <button onClick={() => addPerson({ name: "الجد" })} style={{
                   background: C.gold, color: "#ffffff", border: "none", padding: "10px 22px",
                   borderRadius: 8, fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: "'Tajawal'",
                 }}>+ أضف أول شخص</button>
@@ -2261,8 +2261,8 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
         </div>
       </div>
 
-      <label style={label}>الاسم</label>
-      <input value={person.name} onChange={e => onName(e.target.value)}
+      <label style={label}>الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)</label>
+      <input value={person.name} onChange={e => onName(e.target.value.replace(/\s+/g, ""))}
         onBlur={e => onNameCommit(e.target.value)} style={inp} />
 
       <label style={label}>الكنية / اللقب (أبو فلان…)</label>
