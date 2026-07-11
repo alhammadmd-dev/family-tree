@@ -1003,7 +1003,7 @@ function FamilyTree() {
   };
   const addEdge = (from, to, type) => {
     if (from === to) return;
-    if (edges.some(e => e.from === from && e.to === to)) return;
+    if (edges.some(e => e.from === from && e.to === to || type === "spouse" && e.type === "spouse" && e.from === to && e.to === from)) return;
     const edge = {
       id: uid(),
       from,
@@ -1422,6 +1422,16 @@ function FamilyTree() {
   const treePos = viewMode === "tree" && treeCollapsed ? tidyLayout(treeCollapsed) : null;
   treePosRef.current = treePos || treePosRef.current;
   mainRootRef.current = mainRoot;
+  const lineageStr = id => {
+    const parts = [];
+    let c = id,
+      n = 0;
+    while (primParent[c] && n++ < 4) {
+      c = primParent[c];
+      if (pmap[c]) parts.push(pmap[c].name);
+    }
+    return parts.length ? `${pmap[id]?.gender === "f" ? "بنت" : "بن"} ${parts.join(" بن ")}` : "";
+  };
 
   // hourglass layout around focusId
   const hgFocus = viewMode === "focus" ? focusId && visIds.has(focusId) ? focusId : selectedId && visIds.has(selectedId) ? selectedId : mainRoot : null;
@@ -2637,6 +2647,8 @@ function FamilyTree() {
     onAddChild: g => addChild(selected.id, g),
     onAddParent: g => addParent(selected.id, g),
     onAddSpouse: () => addSpouse(selected.id),
+    onLinkSpouse: otherId => addEdge(selected.id, otherId, "spouse"),
+    lineageOf: lineageStr,
     onDelete: () => deletePerson(selected.id),
     onRemoveEdge: removeEdge,
     onRadial: () => setRadialRoot(selected.id),
@@ -3542,6 +3554,75 @@ function PocPicker({
     }
   }, p.name, p.nickname ? ` (${p.nickname})` : "")))));
 }
+
+// searchable picker to marry two people who both already exist in the tree
+function SpousePicker({
+  C,
+  people,
+  person,
+  edges,
+  lineageOf,
+  onPick
+}) {
+  const [q, setQ] = useState("");
+  const existing = new Set(edges.filter(e => e.type === "spouse" && (e.from === person.id || e.to === person.id)).map(e => e.from === person.id ? e.to : e.from));
+  const nq = normAr(q);
+  const hits = nq ? people.filter(p => p.id !== person.id && p.gender === "f" !== (person.gender === "f") && !existing.has(p.id) && (normAr(p.name).includes(nq) || normAr(p.nickname).includes(nq))).slice(0, 8) : [];
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("input", {
+    value: q,
+    onChange: e => setQ(e.target.value),
+    placeholder: person.gender === "f" ? "ابحث عن اسم الزوج…" : "ابحث عن اسم الزوجة…",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      padding: "9px 11px",
+      borderRadius: 7,
+      border: `1px solid ${C.border}`,
+      background: C.panel2,
+      color: C.parch,
+      fontFamily: "'Tajawal'",
+      fontSize: 14,
+      outline: "none"
+    }
+  }), hits.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${C.border}`,
+      borderRadius: 7,
+      marginTop: 4,
+      maxHeight: 220,
+      overflowY: "auto"
+    }
+  }, hits.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    onClick: () => {
+      onPick(p.id);
+      setQ("");
+    },
+    style: {
+      padding: "7px 11px",
+      cursor: "pointer",
+      borderBottom: `1px solid ${C.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: "'Amiri',serif",
+      fontWeight: 700,
+      fontSize: 14,
+      color: C.parch
+    }
+  }, p.name, p.nickname ? ` (${p.nickname})` : ""), lineageOf(p.id) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: C.sub
+    }
+  }, lineageOf(p.id))))), nq && !hits.length && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub,
+      marginTop: 6
+    }
+  }, "لا نتائج مطابقة داخل الشجرة."));
+}
 function UnlockModal({
   C,
   onTry,
@@ -3930,6 +4011,8 @@ function EditPanel({
   onAddChild,
   onAddParent,
   onAddSpouse,
+  onLinkSpouse,
+  lineageOf,
   onDelete,
   onRemoveEdge,
   onSelect,
@@ -3960,6 +4043,7 @@ function EditPanel({
     margin: "4px 0 10px",
     fontWeight: 700
   };
+  const [showSpousePick, setShowSpousePick] = useState(false);
   const parents = edges.filter(e => e.type !== "spouse" && e.to === person.id);
   const children = edges.filter(e => e.type !== "spouse" && e.from === person.id);
   const spouses = edges.filter(e => e.type === "spouse" && (e.from === person.id || e.to === person.id));
@@ -4191,7 +4275,36 @@ function EditPanel({
       marginBottom: 10,
       lineHeight: 1.8
     }
-  }, "🔒 إضافة الإناث (والدة، بنت، زوجة) تظهر في الوضع العائلي فقط — اضغط أحد الأزرار الباهتة لإدخال رمز العائلة."), /*#__PURE__*/React.createElement("button", {
+  }, "🔒 إضافة الإناث (والدة، بنت، زوجة) تظهر في الوضع العائلي فقط — اضغط أحد الأزرار الباهتة لإدخال رمز العائلة."), familyMode && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    C: C,
+    active: showSpousePick,
+    onClick: () => setShowSpousePick(v => !v)
+  }, "⚭ ربط ", person.gender === "f" ? "زوج" : "زوجة", " من الشجرة"), showSpousePick && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.sub,
+      marginBottom: 6,
+      lineHeight: 1.7
+    }
+  }, "للزواج من داخل العائلة: ابحث عن ", person.gender === "f" ? "الزوج" : "الزوجة", " الموجود", person.gender === "f" ? "" : "ة", " في الشجرة بدل إنشاء شخص جديد."), /*#__PURE__*/React.createElement(SpousePicker, {
+    C: C,
+    people: people,
+    person: person,
+    edges: edges,
+    lineageOf: lineageOf,
+    onPick: id => {
+      onLinkSpouse(id);
+      setShowSpousePick(false);
+    }
+  }))), /*#__PURE__*/React.createElement("button", {
     onClick: onRadial,
     style: {
       width: "100%",
