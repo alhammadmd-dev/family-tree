@@ -280,6 +280,20 @@ function FamilyTree() {
       localStorage.setItem("ft:viewmode", m);
     } catch {}
   };
+  const [showWomenKids, setShowWomenKidsRaw] = useState(() => {
+    try {
+      return localStorage.getItem("ft:womenkids") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setShowWomenKids = v => {
+    setShowWomenKidsRaw(v);
+    try {
+      localStorage.setItem("ft:womenkids", v ? "1" : "0");
+    } catch {}
+  };
+  const viaWomenRef = useRef(new Set());
   const [treeCollapsed, setTreeCollapsed] = useState(null); // Set of collapsed node ids
   const [listOpen, setListOpen] = useState(null); // Set of expanded list rows
   const [focusId, setFocusId] = useState(null); // hourglass center
@@ -629,6 +643,7 @@ function FamilyTree() {
     const m = window.location.hash.match(/^#p=(.+)$/);
     const target = m && people.find(x => x.id === decodeURIComponent(m[1]));
     if (target && (target.gender !== "f" || familyMode)) {
+      if (viaWomenRef.current.has(target.id)) setShowWomenKids(true);
       setSelectedId(target.id);
       setTab("view");
       setShowPanel(true);
@@ -662,6 +677,7 @@ function FamilyTree() {
       if (id === selectedId) return;
       const t = people.find(x => x.id === id);
       if (!t || t.gender === "f" && !familyMode) return;
+      if (viaWomenRef.current.has(t.id)) setShowWomenKids(true);
       setSelectedId(t.id);
       setTab("view");
       setShowPanel(true);
@@ -1052,6 +1068,10 @@ function FamilyTree() {
   const addChild = (parentId, gender = "m") => {
     const parent = people.find(p => p.id === parentId);
     if (!parent) return;
+    // a child of a daughter (or of a married-in father) falls under the
+    // أبناء البنات filter — reveal that layer so the addition stays visible
+    const wouldHide = parent.gender === "f" ? !!primParent[parent.id] : viaWomen.has(parentId) || !primParent[parentId] && spousesOf(parentId).some(sp => primParent[sp]);
+    if (wouldHide && !showWomenKids) setShowWomenKids(true);
     const sibs = edges.filter(e => e.type !== "spouse" && e.from === parentId).map(e => people.find(p => p.id === e.to)).filter(Boolean);
     const cy = parent.y + 250;
     const child = addPerson({
@@ -1337,8 +1357,45 @@ function FamilyTree() {
   const pmap = {};
   for (const _p of people) pmap[_p.id] = _p;
 
-  // outside family mode the female layer is hidden entirely
-  const visPeople = familyMode ? people : people.filter(p => p.gender !== "f");
+  // أبناء البنات: descendants whose line enters through a family daughter
+  // (children of daughters, children of married-in husbands, and their subtrees)
+  const viaWomen = new Set();
+  {
+    const pbc = {},
+      byId = {},
+      prim = {},
+      cm = {};
+    edges.filter(e => e.type !== "spouse").forEach(e => (pbc[e.to] ||= []).push(e.from));
+    people.forEach(p => {
+      byId[p.id] = p;
+    });
+    for (const c in pbc) {
+      const f = pbc[c].find(x => byId[x]?.gender !== "f") || pbc[c][0];
+      prim[c] = f;
+      (cm[f] ||= []).push(c);
+    }
+    const seeds = [];
+    people.forEach(p => {
+      if (p.gender === "f" && prim[p.id]) (cm[p.id] || []).forEach(k => seeds.push(k));
+      if (p.gender !== "f" && !prim[p.id]) {
+        // married-in man: his spouse belongs to the family (has a parent link)
+        const spIds = edges.filter(e => e.type === "spouse" && (e.from === p.id || e.to === p.id)).map(e => e.from === p.id ? e.to : e.from);
+        if (spIds.some(sp => prim[sp])) (cm[p.id] || []).forEach(k => seeds.push(k));
+      }
+    });
+    const stack = [...seeds];
+    while (stack.length) {
+      const id = stack.pop();
+      if (viaWomen.has(id)) continue;
+      viaWomen.add(id);
+      (cm[id] || []).forEach(k => stack.push(k));
+    }
+  }
+  viaWomenRef.current = viaWomen;
+
+  // outside family mode the female layer is hidden entirely;
+  // أبناء البنات hidden unless their toggle is on
+  const visPeople = people.filter(p => (familyMode || p.gender !== "f") && (showWomenKids || !viaWomen.has(p.id)));
   const visIds = new Set(visPeople.map(p => p.id));
   const visEdges = edges.filter(e => visIds.has(e.from) && visIds.has(e.to));
   const selected = visPeople.find(p => p.id === selectedId);
@@ -1603,7 +1660,11 @@ function FamilyTree() {
     C: C,
     active: familyMode,
     onClick: () => familyMode ? lockFamily() : setShowUnlock(true)
-  }, familyMode ? "🔓 الوضع العائلي" : "🔒 الوضع العائلي"), canEdit && /*#__PURE__*/React.createElement(Btn, {
+  }, familyMode ? "🔓 الوضع العائلي" : "🔒 الوضع العائلي"), (viaWomen.size > 0 || showWomenKids) && /*#__PURE__*/React.createElement(Btn, {
+    C: C,
+    active: showWomenKids,
+    onClick: () => setShowWomenKids(!showWomenKids)
+  }, "👶 أبناء البنات", showWomenKids ? "" : ` (${viaWomen.size})`), canEdit && /*#__PURE__*/React.createElement(Btn, {
     C: C,
     onClick: () => addPerson()
   }, "+ شخص"), canEdit && /*#__PURE__*/React.createElement(Btn, {
