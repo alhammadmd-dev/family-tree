@@ -2515,7 +2515,7 @@ function FamilyTree() {
         color: C.sub,
         marginTop: 1
       }
-    }, anc.length > 0 ? `${p.gender === "f" ? "بنت" : "بن"} ${anc.join(" بن ")}${primParent[c] ? "…" : ""}` : `زوجة ${husband}`));
+    }, anc.length > 0 ? `${p.gender === "f" ? "بنت" : "بن"} ${anc.join(" بن ")}${primParent[c] ? "…" : ""}` : `${p.gender === "f" ? "زوجة" : "زوج"} ${husband}`));
   })))), showPanel && /*#__PURE__*/React.createElement("div", {
     style: isMobile ? {
       position: "absolute",
@@ -4094,14 +4094,18 @@ function EditPanel({
   }, photo ? "تغيير الصورة" : "رفع صورة"), photo && /*#__PURE__*/React.createElement(Btn, {
     C: C,
     onClick: onRemovePhoto
-  }, "حذف الصورة"))), /*#__PURE__*/React.createElement("label", {
-    style: label
-  }, person.gender === "f" ? "الاسم (يمكن كتابة اسم العائلة، مثل «نورة العتيبي»)" : "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"), /*#__PURE__*/React.createElement("input", {
-    value: person.name,
-    onChange: e => onName(person.gender === "f" ? e.target.value : e.target.value.replace(/\s+/g, "")),
-    onBlur: e => onNameCommit(e.target.value),
-    style: inp
-  }), /*#__PURE__*/React.createElement("label", {
+  }, "حذف الصورة"))), (() => {
+    // spouses who married into the family (no parent link) keep their family name
+    const marriedIn = person.gender === "f" || !edges.some(e => e.type !== "spouse" && e.to === person.id) && edges.some(e => e.type === "spouse" && (e.from === person.id || e.to === person.id));
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+      style: label
+    }, marriedIn ? "الاسم (يمكن كتابة اسم العائلة، مثل «نورة العتيبي»)" : "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"), /*#__PURE__*/React.createElement("input", {
+      value: person.name,
+      onChange: e => onName(marriedIn ? e.target.value : e.target.value.replace(/\s+/g, "")),
+      onBlur: e => onNameCommit(e.target.value),
+      style: inp
+    }));
+  })(), /*#__PURE__*/React.createElement("label", {
     style: label
   }, "الكنية / اللقب (أبو فلان…)"), /*#__PURE__*/React.createElement("input", {
     value: person.nickname || "",

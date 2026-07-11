@@ -1553,7 +1553,7 @@ function FamilyTree() {
                         <div style={{ fontSize: 11, color: C.sub, marginTop: 1 }}>
                           {anc.length > 0
                             ? `${p.gender === "f" ? "بنت" : "بن"} ${anc.join(" بن ")}${primParent[c] ? "…" : ""}`
-                            : `زوجة ${husband}`}
+                            : `${p.gender === "f" ? "زوجة" : "زوج"} ${husband}`}
                         </div>
                       )}
                     </div>
@@ -2351,14 +2351,23 @@ function EditPanel({ C, person, photo, people, edges, familyMode, onRadial, onNa
         </div>
       </div>
 
-      <label style={label}>
-        {person.gender === "f"
-          ? "الاسم (يمكن كتابة اسم العائلة، مثل «نورة العتيبي»)"
-          : "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"}
-      </label>
-      <input value={person.name}
-        onChange={e => onName(person.gender === "f" ? e.target.value : e.target.value.replace(/\s+/g, ""))}
-        onBlur={e => onNameCommit(e.target.value)} style={inp} />
+      {(() => {
+        // spouses who married into the family (no parent link) keep their family name
+        const marriedIn = person.gender === "f" || (
+          !edges.some(e => e.type !== "spouse" && e.to === person.id)
+          && edges.some(e => e.type === "spouse" && (e.from === person.id || e.to === person.id))
+        );
+        return (<React.Fragment>
+          <label style={label}>
+            {marriedIn
+              ? "الاسم (يمكن كتابة اسم العائلة، مثل «نورة العتيبي»)"
+              : "الاسم (كلمة واحدة — المركّب يُكتب موصولًا مثل «عبدالله»)"}
+          </label>
+          <input value={person.name}
+            onChange={e => onName(marriedIn ? e.target.value : e.target.value.replace(/\s+/g, ""))}
+            onBlur={e => onNameCommit(e.target.value)} style={inp} />
+        </React.Fragment>);
+      })()}
 
       <label style={label}>الكنية / اللقب (أبو فلان…)</label>
       <input value={person.nickname || ""} onChange={e => onNickname(e.target.value)} style={inp} />
